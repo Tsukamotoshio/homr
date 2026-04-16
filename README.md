@@ -1,4 +1,18 @@
-# homr
+# homr (fork)
+
+> **Fork Notice**: This is a fork of [liebharc/homr](https://github.com/liebharc/homr) with the following
+> modifications applied on top of the upstream codebase:
+>
+> - **DirectML GPU inference**: `DmlExecutionProvider` support for Windows DirectX 12 GPUs (with automatic
+>   CPU fallback), replacing the CUDA-only path in `inference_segnet.py`, `encoder_inference.py`, and
+>   `decoder_inference.py`.
+> - **ORT thread limits**: `intra_op_num_threads` is capped at half the logical CPU count and
+>   `inter_op_num_threads` is set to 1, preventing ONNX Runtime from saturating the system when running
+>   inside a GUI or async workload.
+> - **Safe resource teardown**: Explicit `__del__` methods release `io_binding` before `InferenceSession`
+>   to avoid a use-after-free crash (0xC0000005) during session destruction.
+> - **Preserve valid XML output**: A `_xml_written` flag in `main.py` ensures that a successfully written
+>   MusicXML file is not deleted when an exception is raised during post-write cleanup.
 
 homr is an Optical Music Recognition (OMR) software designed to transform camera pictures of sheet music into
 machine-readable MusicXML format. The resulting [MusicXML](https://www.w3.org/2021/06/musicxml40/) files can be further
