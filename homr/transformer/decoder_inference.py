@@ -11,7 +11,7 @@ from homr.type_definitions import NDArray
 
 # 限制 onnxruntime CPU 推理线程数（使用不超过一半的逻辑核心），
 # 避免推理阶段占满所有 CPU 核心导致系统响应迟缓。
-_ORT_INTRA_THREADS = max(1, (os.cpu_count() or 4) // 2)
+_ORT_INTRA_THREADS = max(1, (os.cpu_count() or 4) - 2)
 
 
 class ScoreDecoder:

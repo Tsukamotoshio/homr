@@ -6,7 +6,7 @@ from time import perf_counter
 
 # 限制 onnxruntime CPU 推理线程数（使用不超过一半的逻辑核心），
 # 避免推理阶段占满所有 CPU 核心导致系统响应迟缓。
-_ORT_INTRA_THREADS = max(1, (os.cpu_count() or 4) // 2)
+_ORT_INTRA_THREADS = max(1, (os.cpu_count() or 4) - 2)
 
 import cv2
 import numpy as np
