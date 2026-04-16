@@ -4,6 +4,10 @@ import os
 from pathlib import Path
 from time import perf_counter
 
+# 限制 onnxruntime CPU 推理线程数（使用不超过一半的逻辑核心），
+# 避免推理阶段占满所有 CPU 核心导致系统响应迟缓。
+_ORT_INTRA_THREADS = max(1, (os.cpu_count() or 4) // 2)
+
 import cv2
 import numpy as np
 import onnxruntime as ort
@@ -20,22 +24,32 @@ from homr.type_definitions import NDArray
 class Segnet:
     def __init__(self, use_gpu_inference: bool) -> None:
         self.use_gpu = False
+        _sess_opts = ort.SessionOptions()
+        _sess_opts.log_severity_level = 3  # 仅显示 ERROR，抑制 WARNING/INFO（含 Conv Fallback 等）
+        _sess_opts.intra_op_num_threads = _ORT_INTRA_THREADS  # 限制单算子并行线程
+        _sess_opts.inter_op_num_threads = 1                   # 算子间串行执行
         if use_gpu_inference:
             try:
                 self.model = ort.InferenceSession(
-                    segnet_path_onnx_fp16, providers=["CUDAExecutionProvider"]
+                    segnet_path_onnx_fp16,
+                    sess_options=_sess_opts,
+                    providers=["DmlExecutionProvider"],
                 )
                 self.fp16 = True
                 self.use_gpu = True
-            except Exception as e:
-                eprint(
-                    "Error while trying to load model using CUDA. You probably don't have a compatible gpu"  # noqa: E501
+            except Exception:
+                self.model = ort.InferenceSession(
+                    segnet_path_onnx_fp16,
+                    sess_options=_sess_opts,
+                    providers=["CPUExecutionProvider"],
                 )
-                eprint(e)
-                self.model = ort.InferenceSession(segnet_path_onnx_fp16)
                 self.fp16 = True
         else:
-            self.model = ort.InferenceSession(segnet_path_onnx)
+            self.model = ort.InferenceSession(
+                segnet_path_onnx,
+                sess_options=_sess_opts,
+                providers=["CPUExecutionProvider"],
+            )
             self.fp16 = False
 
         self.io_binding = self.model.io_binding()
@@ -43,6 +57,23 @@ class Segnet:
 
         self.input_name = self.model.get_inputs()[0].name  # size: [batch_size, 3, 320, 320]
         self.output_name = self.model.get_outputs()[0].name
+
+    def __del__(self) -> None:
+        # io_binding 持有指向 InferenceSession 的裸指针（C++ 层），
+        # 必须在 session 释放之前先释放 io_binding，否则 session 析构后
+        # io_binding 析构时访问悬空指针 → 0xC0000005 (use-after-free)。
+        # 默认情况下 Python 按 __dict__ 插入顺序释放属性（model 先于 io_binding），
+        # 此 __del__ 显式确保正确的释放顺序。
+        try:
+            if hasattr(self, 'io_binding'):
+                del self.io_binding
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'model'):
+                del self.model
+        except Exception:
+            pass
 
     def run(self, input_data: NDArray) -> NDArray:
         if self.fp16:

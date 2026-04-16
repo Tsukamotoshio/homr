@@ -168,6 +168,7 @@ def process_image(
     eprint("Processing " + image_path)
     xml_file = replace_extension(image_path, ".musicxml")
     debug_cleanup: Debug | None = None
+    _xml_written = False  # track whether xml.write() has already succeeded
     try:
         if config.read_staff_positions:
             image = cv2.imread(image_path)
@@ -201,6 +202,7 @@ def process_image(
         eprint("Writing XML", result_staffs)
         xml = generate_xml(xml_generator_args, result_staffs, title)
         xml.write(xml_file)
+        _xml_written = True  # file is now complete; keep it even if later cleanup throws
 
         eprint("Finished parsing " + str(len(result_staffs)) + " staves")
         teaser_file = replace_extension(image_path, "_teaser.png")
@@ -212,7 +214,11 @@ def process_image(
 
         eprint("Result was written to", xml_file)
     except:
-        if os.path.exists(xml_file):
+        # Only remove the output file if the XML write itself never completed.
+        # If _xml_written is True the file is valid; the exception came from
+        # post-write housekeeping (e.g. CUDA session destruction) and the
+        # caller can still use the output.
+        if not _xml_written and os.path.exists(xml_file):
             os.remove(xml_file)
         raise
     finally:
