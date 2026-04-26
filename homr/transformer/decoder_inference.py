@@ -209,8 +209,18 @@ def get_decoder(config: Config) -> ScoreDecoder:
                 providers=["DmlExecutionProvider"],
             )
             fp16 = True
+            # Sometimes Ort falls automatically back to the CPU EP
+            # if so we get an error due to the device selection in init_cache()
+            if "CUDAExecutionProvider" in onnx_transformer.get_providers():
+                use_gpu = True
+            else:
+                eprint(
+                    "Onnxruntime is not using GPU and therefore falling back to CPU. This is slow."
+                )
             # DML: use_gpu stays False — io_binding outputs remain on CPU for compatibility
-        except Exception:
+        except Exception as ex:
+            eprint(ex)
+            eprint("Going on without GPU support")
             onnx_transformer = ort.InferenceSession(
                 config.filepaths.decoder_path_fp16,
                 sess_options=_sess_opts,
