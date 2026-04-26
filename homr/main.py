@@ -77,6 +77,7 @@ def get_predictions(
     img_path: str,
     enable_cache: bool,
     use_gpu_inference: bool,
+    batch_size: int = 8,
 ) -> InputPredictions:
     result = extract(
         preprocessed,
@@ -84,6 +85,7 @@ def get_predictions(
         step_size=320,
         use_cache=enable_cache,
         use_gpu_inference=use_gpu_inference,
+        batch_size=batch_size,
     )
     original_image = cv2.resize(original, (result.staff.shape[1], result.staff.shape[0]))
     preprocessed_image = cv2.resize(preprocessed, (result.staff.shape[1], result.staff.shape[0]))
@@ -103,7 +105,8 @@ def replace_extension(path: str, new_extension: str) -> str:
 
 
 def load_and_preprocess_predictions(
-    image_path: str, enable_debug: bool, enable_cache: bool, use_gpu_inference: bool
+    image_path: str, enable_debug: bool, enable_cache: bool, use_gpu_inference: bool,
+    segnet_batch_size: int = 8,
 ) -> tuple[InputPredictions, Debug]:
     image = cv2.imread(image_path)
     if image is None:
@@ -113,7 +116,8 @@ def load_and_preprocess_predictions(
     image = autocrop(image)
     image = resize_image(image)
     preprocessed = color_adjust.apply_clahe(image)
-    predictions = get_predictions(image, preprocessed, image_path, enable_cache, use_gpu_inference)
+    predictions = get_predictions(image, preprocessed, image_path, enable_cache, use_gpu_inference,
+                                   batch_size=segnet_batch_size)
     debug = Debug(predictions.original, image_path, enable_debug)
     debug.write_image("color_adjust", preprocessed)
 
@@ -158,6 +162,7 @@ class ProcessingConfig:
     read_staff_positions: bool
     selected_staff: int
     use_gpu_inference: bool
+    segnet_batch_size: int = 8  # SegNet 每批推理的 patch 数；弱机可降低以减少内存峰值
 
 
 def process_image(
@@ -230,7 +235,8 @@ def detect_staffs_in_image(
     image_path: str, config: ProcessingConfig
 ) -> tuple[list[MultiStaff], NDArray, Debug, Future[str]]:
     predictions, debug = load_and_preprocess_predictions(
-        image_path, config.enable_debug, config.enable_cache, config.use_gpu_inference
+        image_path, config.enable_debug, config.enable_cache, config.use_gpu_inference,
+        segnet_batch_size=config.segnet_batch_size,
     )
     symbols = predict_symbols(debug, predictions)
 
