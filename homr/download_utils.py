@@ -8,17 +8,28 @@ from homr.simple_logging import eprint
 
 
 def download_file(url: str, filename: str) -> None:
-    response = requests.get(url, stream=True, timeout=5)
-    total = int(response.headers.get("content-length", 0))
+    """Download url to filename with resume support and a long read timeout."""
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+
+    existing = os.path.getsize(filename) if os.path.exists(filename) else 0
+    headers = {"Range": f"bytes={existing}-"} if existing else {}
+
+    response = requests.get(url, stream=True, timeout=(15, 120), headers=headers)
+    # 416 = Range Not Satisfiable → file already complete
+    if response.status_code == 416:
+        eprint(f"\rAlready complete: {os.path.basename(filename)}")
+        return
+    response.raise_for_status()
+
+    total_from_header = int(response.headers.get("content-length", 0))
+    total = total_from_header + existing
     totalMb = round(total / 1024 / 1024)
     last_percent = -1
     complete = 100
 
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
-
-    with open(filename, "wb") as f:
-        for chunk in response.iter_content(chunk_size=1024):
-            if chunk:  # filter out keep-alive new chunks
+    with open(filename, "ab" if existing else "wb") as f:
+        for chunk in response.iter_content(chunk_size=65536):
+            if chunk:
                 f.write(chunk)
                 progress = f.tell()
                 progressMb = round(progress / 1024 / 1024)

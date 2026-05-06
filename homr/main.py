@@ -314,8 +314,50 @@ def get_all_image_files_in_folder(folder: str) -> list[str]:
     return sorted(without_teasers)
 
 
+_WEIGHT_BASE_URLS = [
+    # ModelScope 镜像（大陆访问优先）
+    "https://modelscope.cn/models/Tsukamotoshio/homr/resolve/master/",
+    # 官方 GitHub Releases（备用）
+    "https://github.com/liebharc/homr/releases/download/onnx_checkpoints/",
+]
+
+
+def _download_from_any_source(onnx_path: str, dest_model_path: str) -> None:
+    """依次尝试多个下载源下载单个模型文件，成功即返回，全部失败则抛出最后一个异常。
+
+    ModelScope 源直接提供 .onnx 文件；GitHub 源提供 .zip 需解压。
+    """
+    base_name = os.path.basename(onnx_path).split(".")[0]
+    dest_dir = os.path.dirname(dest_model_path)
+    last_err: Exception = RuntimeError("No sources configured")
+
+    for base_url in _WEIGHT_BASE_URLS:
+        is_modelscope = "modelscope.cn" in base_url
+        try:
+            if is_modelscope:
+                # ModelScope：直接下载 .onnx（按目录结构拼路径）
+                rel = os.path.relpath(dest_model_path,
+                                      os.path.dirname(os.path.dirname(dest_model_path)))
+                url = base_url + rel.replace("\\", "/")
+                download_utils.download_file(url, dest_model_path)
+            else:
+                # GitHub：下载 .zip 再解压
+                zip_name = base_name + ".zip"
+                downloaded_zip = os.path.join(dest_dir, zip_name)
+                try:
+                    download_utils.download_file(base_url + zip_name, downloaded_zip)
+                    download_utils.unzip_file(downloaded_zip, dest_dir)
+                finally:
+                    if os.path.exists(downloaded_zip):
+                        os.remove(downloaded_zip)
+            return
+        except Exception as e:
+            eprint(f"\nSource {base_url} failed: {e}, trying next...")
+            last_err = e
+    raise last_err
+
+
 def download_weights(use_gpu_inference: bool) -> None:
-    base_url = "https://github.com/liebharc/homr/releases/download/onnx_checkpoints/"
     if use_gpu_inference:
         models = [
             segnet_path_onnx_fp16,
@@ -339,17 +381,7 @@ def download_weights(use_gpu_inference: bool) -> None:
         if not os.path.exists(model):
             base_name = os.path.basename(model).split(".")[0]
             eprint(f"Downloading {base_name}")
-            try:
-                zip_name = base_name + ".zip"
-                download_url = base_url + zip_name
-                downloaded_zip = os.path.join(os.path.dirname(model), zip_name)
-                download_utils.download_file(download_url, downloaded_zip)
-
-                destination_dir = os.path.dirname(model)
-                download_utils.unzip_file(downloaded_zip, destination_dir)
-            finally:
-                if os.path.exists(downloaded_zip):
-                    os.remove(downloaded_zip)
+            _download_from_any_source(model, model)
 
 
 def main() -> None:
