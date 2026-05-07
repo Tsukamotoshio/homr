@@ -1,5 +1,6 @@
 import argparse
 import glob
+import hashlib
 import os
 import sys
 from concurrent.futures import Future
@@ -320,6 +321,57 @@ _WEIGHT_BASE_URLS = [
     # 官方 GitHub Releases（备用）
     "https://github.com/liebharc/homr/releases/download/onnx_checkpoints/",
 ]
+
+# Canonical filenames of all 6 HOMR ONNX weights (CPU + GPU/fp16 sets).
+# Order matches download priority — segmentation first (smallest), then encoder,
+# then decoder (largest). Sequential download lets users see fast initial progress.
+_WEIGHT_FILES = [
+    "segnet_308-3296ccd40960f90ca6ab9c035cca945675d30a0f.onnx",
+    "segnet_308-3296ccd40960f90ca6ab9c035cca945675d30a0f_fp16.onnx",
+    "encoder_pytorch_model_331-e10346542968cc71fbcce0c0696f3ac963f11ae1.onnx",
+    "encoder_pytorch_model_331-e10346542968cc71fbcce0c0696f3ac963f11ae1_fp16.onnx",
+    "decoder_pytorch_model_331-e10346542968cc71fbcce0c0696f3ac963f11ae1.onnx",
+    "decoder_pytorch_model_331-e10346542968cc71fbcce0c0696f3ac963f11ae1_fp16.onnx",
+]
+
+# SHA256 hash of each weight file (lowercase hex, no prefix).
+# Computed from the canonical files served by ModelScope / GitHub releases.
+# Both mirrors must serve byte-identical files; if a future weight version is
+# uploaded with different bytes, regenerate these hashes from one mirror and
+# verify the other matches before shipping.
+_WEIGHT_HASHES: dict[str, str] = {
+    'segnet_308-3296ccd40960f90ca6ab9c035cca945675d30a0f.onnx':
+        '6ed36640db4ef5d223098b6d5efe4eda97c66b24a2c72faab8a018c749003a8d',
+    'segnet_308-3296ccd40960f90ca6ab9c035cca945675d30a0f_fp16.onnx':
+        '60f495496cb41473c0521d0811d8f44b9d5cff892d287974a8aebb3eaee2fa83',
+    'encoder_pytorch_model_331-e10346542968cc71fbcce0c0696f3ac963f11ae1.onnx':
+        'de27b33554d89cc9aed2128188fc24c9ba69c1209cea7686cb9c344a72076c37',
+    'encoder_pytorch_model_331-e10346542968cc71fbcce0c0696f3ac963f11ae1_fp16.onnx':
+        'a11c8b80485e0c57c5967c082108b9103ed7d52f7f9d31304484ee95e6b96745',
+    'decoder_pytorch_model_331-e10346542968cc71fbcce0c0696f3ac963f11ae1.onnx':
+        'fb678135e00c5777071f04906e178019a80fb42bb3d4210b859604e3368f1739',
+    'decoder_pytorch_model_331-e10346542968cc71fbcce0c0696f3ac963f11ae1_fp16.onnx':
+        '0c5549700a06733ec60e1bf0f0852f29300495c8fdeaee657341d2042ad5935e',
+}
+# Sanity check: every file in _WEIGHT_FILES must have a hash entry.
+assert set(_WEIGHT_HASHES.keys()) == set(_WEIGHT_FILES), (
+    'WEIGHT_HASHES out of sync with _WEIGHT_FILES — one was added without the other'
+)
+
+
+def verify_sha256(path: str, expected: str) -> bool:
+    """Return True if the file at `path` has SHA256 == `expected`.
+
+    Empty `expected` short-circuits to True (used during early dev before hashes
+    are filled in). Raises FileNotFoundError if the file is missing.
+    """
+    if not expected:
+        return True
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest().lower() == expected.lower()
 
 
 def _download_from_any_source(onnx_path: str, dest_model_path: str) -> None:
