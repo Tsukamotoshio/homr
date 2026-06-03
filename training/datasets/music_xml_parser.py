@@ -86,6 +86,8 @@ ARTIC_MAPPING: dict[str, str] = {
     "scoop": "",
     "doit": "",
     "caesura": "",
+    "otherOrnament": "",
+    "otherArticulation": "",
 }
 
 
@@ -162,32 +164,35 @@ class TokensMeasure:
             return "upper"
         return "lower"
 
-    def _fill_in_arpeggiate(self, symbols: list[EncodedSymbolWithPos]) -> None:
+    def _fill_in_arpeggiate(self, symbols_with_pos: list[EncodedSymbolWithPos]) -> None:
         """
         In the Lieder dataset we find that an arpeggiate always is rendered
         as it would affect all notes in a chord, even if the MusicXML doesn't
         reflect that.
         """
         arpegiatted_positions = set()
-        for symbol in symbols:
-            if "arpeggiate" in symbol.symbol.articulation:
-                arpegiatted_positions.add(symbol.position)
+        for entry in symbols_with_pos:
+            pos, sym = entry.position, entry.symbol
+            if "arpeggiate" in sym.articulation:
+                # `pos` is the position in the measure, `sym.position` is the upper/lower staff.
+                arpegiatted_positions.add((pos, sym.position))
 
-        for symbol in symbols:
+        for entry in symbols_with_pos:
+            pos, sym = entry.position, entry.symbol
             if (
-                symbol.position in arpegiatted_positions
-                and "arpeggiate" not in symbol.symbol.articulation
-                and symbol.symbol.rhythm.startswith(("note", "rest"))
-                and not symbol.symbol.rhythm.startswith("note_0")
-                and not symbol.symbol.rhythm.startswith("rest_0")
+                (pos, sym.position) in arpegiatted_positions
+                and "arpeggiate" not in sym.articulation
+                and sym.rhythm.startswith(("note", "rest"))
+                and not sym.rhythm.startswith("note_0")
+                and not sym.rhythm.startswith("rest_0")
             ):
-                art = symbol.symbol.articulation
+                art = sym.articulation
                 art_parts = []
                 if art != empty:
                     art_parts = art.split("_")
                 art_parts.append("arpeggiate")
                 art = str.join("_", sorted(art_parts))
-                symbol.symbol.articulation = art
+                sym.articulation = art
 
     def complete_measure(self) -> Measure:  # noqa: C901
         self._fill_in_arpeggiate(self.symbols)
@@ -669,16 +674,25 @@ def _remove_dynamics_attribute_from_nodes_recursive(node: ET.Element) -> None:
     """
     We don't need the dynamics attribute in the XML, but XSD validation
     sometimes fails if its negative. So we remove it.
+
+    Also strips unwanted nodes (and their children) entirely.
     """
     if "dynamics" in node.attrib:
         del node.attrib["dynamics"]
-
-    filtered_tags = {"metronome", "ending", "direction"}
-
+    filtered_tags = {
+        "metronome",
+        "ending",
+        "direction",
+        "identification",
+        "miscellaneous",
+        "defaults",
+        "credit",
+    }
     for child in list(node):
         if child.tag in filtered_tags:
             node.remove(child)
-        _remove_dynamics_attribute_from_nodes_recursive(child)
+        else:
+            _remove_dynamics_attribute_from_nodes_recursive(child)
 
 
 if __name__ == "__main__":

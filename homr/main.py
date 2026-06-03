@@ -328,10 +328,10 @@ _WEIGHT_BASE_URLS = [
 _WEIGHT_FILES = [
     "segnet_308-3296ccd40960f90ca6ab9c035cca945675d30a0f.onnx",
     "segnet_308-3296ccd40960f90ca6ab9c035cca945675d30a0f_fp16.onnx",
-    "encoder_pytorch_model_331-e10346542968cc71fbcce0c0696f3ac963f11ae1.onnx",
-    "encoder_pytorch_model_331-e10346542968cc71fbcce0c0696f3ac963f11ae1_fp16.onnx",
-    "decoder_pytorch_model_331-e10346542968cc71fbcce0c0696f3ac963f11ae1.onnx",
-    "decoder_pytorch_model_331-e10346542968cc71fbcce0c0696f3ac963f11ae1_fp16.onnx",
+    "encoder_pytorch_model_367-575b4737bca815d3a7b37169269fc548d7e945b9.onnx",
+    "encoder_pytorch_model_367-575b4737bca815d3a7b37169269fc548d7e945b9_fp16.onnx",
+    "decoder_pytorch_model_367-575b4737bca815d3a7b37169269fc548d7e945b9.onnx",
+    "decoder_pytorch_model_367-575b4737bca815d3a7b37169269fc548d7e945b9_fp16.onnx",
 ]
 
 # SHA256 hash of each weight file (lowercase hex, no prefix).
@@ -344,17 +344,17 @@ _WEIGHT_HASHES: dict[str, str] = {
         '6ed36640db4ef5d223098b6d5efe4eda97c66b24a2c72faab8a018c749003a8d',
     'segnet_308-3296ccd40960f90ca6ab9c035cca945675d30a0f_fp16.onnx':
         '60f495496cb41473c0521d0811d8f44b9d5cff892d287974a8aebb3eaee2fa83',
-    'encoder_pytorch_model_331-e10346542968cc71fbcce0c0696f3ac963f11ae1.onnx':
-        'de27b33554d89cc9aed2128188fc24c9ba69c1209cea7686cb9c344a72076c37',
-    'encoder_pytorch_model_331-e10346542968cc71fbcce0c0696f3ac963f11ae1_fp16.onnx':
-        'a11c8b80485e0c57c5967c082108b9103ed7d52f7f9d31304484ee95e6b96745',
-    'decoder_pytorch_model_331-e10346542968cc71fbcce0c0696f3ac963f11ae1.onnx':
-        'fb678135e00c5777071f04906e178019a80fb42bb3d4210b859604e3368f1739',
-    'decoder_pytorch_model_331-e10346542968cc71fbcce0c0696f3ac963f11ae1_fp16.onnx':
-        '0c5549700a06733ec60e1bf0f0852f29300495c8fdeaee657341d2042ad5935e',
+    'encoder_pytorch_model_367-575b4737bca815d3a7b37169269fc548d7e945b9.onnx':
+        '1427f5144d2617184515ba60b50be94a0119a10510a0ff8d58fe5fc4555599c2',
+    'encoder_pytorch_model_367-575b4737bca815d3a7b37169269fc548d7e945b9_fp16.onnx':
+        'aa252963c934234d30faca0a2363903f6ec02e81f85f87f12dadad7035ec6495',
+    'decoder_pytorch_model_367-575b4737bca815d3a7b37169269fc548d7e945b9.onnx':
+        '331cef4a41f39e97b57d506951fa17fb7ae3345eaa6334107c71c1f6203372bd',
+    'decoder_pytorch_model_367-575b4737bca815d3a7b37169269fc548d7e945b9_fp16.onnx':
+        '60c037e2eb30a142d746051e5c3aa0aa23445b3563c44673f95b8b1c5102a6aa',
 }
 # Sanity check: every file in _WEIGHT_FILES must have a hash entry.
-assert set(_WEIGHT_HASHES.keys()) == set(_WEIGHT_FILES), (
+assert set(_WEIGHT_HASHES.keys()) == set(_WEIGHT_FILES), (  # noqa: S101
     'WEIGHT_HASHES out of sync with _WEIGHT_FILES — one was added without the other'
 )
 

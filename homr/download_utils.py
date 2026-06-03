@@ -8,6 +8,23 @@ from homr.simple_logging import eprint
 
 
 def download_file(url: str, filename: str) -> None:
+    """Download url to filename, retrying on network errors.
+
+    The partial file is intentionally kept between attempts so that
+    `_download_file` resumes via the HTTP Range header instead of restarting.
+    """
+    max_tries = 3
+    for i in range(max_tries):
+        try:
+            _download_file(url, filename)
+            return
+        except requests.exceptions.RequestException as e:
+            eprint(f"\nError downloading file {url}: {e}. Retrying {i + 1}/{max_tries}...")
+
+    raise Exception(f"Failed to download file {url}.")
+
+
+def _download_file(url: str, filename: str) -> None:
     """Download url to filename with resume support and a long read timeout."""
     os.makedirs(os.path.dirname(filename), exist_ok=True)
 
