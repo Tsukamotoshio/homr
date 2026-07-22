@@ -39,8 +39,13 @@ class Segnet:
             try:
                 # I had this issue: https://github.com/microsoft/onnxruntime/issues/21684
                 # If torch is installed, this fixes
-                # "libcudnn.so.9: cannot open shared object file"
-                ort.preload_dlls()
+                # "libcudnn.so.9: cannot open shared object file".
+                # preload_dlls() only matters for the CUDA EP (cudnn loading) and
+                # may be absent in non-CUDA builds (e.g. onnxruntime-directml), so
+                # guard it — otherwise a missing attribute here would send the
+                # DirectML path into the CPU fallback below.
+                if cuda_available() and hasattr(ort, "preload_dlls"):
+                    ort.preload_dlls()
                 providers, _device = gpu_providers()
                 self.model = ort.InferenceSession(
                     segnet_path_onnx_fp16,
