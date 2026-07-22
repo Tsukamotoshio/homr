@@ -2,8 +2,12 @@ import os
 
 import numpy as np
 import onnxruntime as ort
-from onnxruntime import OrtValue
 
+from homr.onnx_providers import (
+    coreml_available,
+    coreml_mlprogram_providers,
+    gpu_providers,
+)
 from homr.simple_logging import eprint
 from homr.transformer.configs import Config
 from homr.type_definitions import NDArray
@@ -22,20 +26,45 @@ class Encoder:
         _sess_opts.inter_op_num_threads = 1                   # 算子间串行执行
         if config.use_gpu_inference:
             try:
+                providers, device = gpu_providers({"cudnn_conv_algo_search": "DEFAULT"})
                 self.encoder = ort.InferenceSession(
                     config.filepaths.encoder_path_fp16,
                     sess_options=_sess_opts,
-                    providers=["DmlExecutionProvider"],
+                    providers=providers,
                 )
                 self.fp16 = True
-                # DML: use_gpu stays False — io_binding outputs remain on CPU for compatibility
-            except Exception:
+                # CoreML/DML bind IO on the CPU even though compute runs on the GPU/ANE.
+                self.use_gpu = device == "cuda"
+
+            except Exception as ex:
+                eprint(ex)
+                eprint("Going on without GPU support")
                 self.encoder = ort.InferenceSession(
                     config.filepaths.encoder_path_fp16,
                     sess_options=_sess_opts,
                     providers=["CPUExecutionProvider"],
                 )
                 self.fp16 = True
+
+        elif config.use_coreml_encoder and coreml_available():
+            try:
+                # CPUAndGPU skips the (slow) ANE specialization: it halves the
+                # session creation time vs "ALL" and inference is even slightly
+                # faster (measured on an M1).
+                self.encoder = ort.InferenceSession(
+                    config.filepaths.encoder_path_fp16,
+                    providers=coreml_mlprogram_providers(
+                        config.filepaths.encoder_path_fp16, compute_units="CPUAndGPU"
+                    ),
+                )
+                self.fp16 = True
+                # use_gpu stays False: CoreML binds IO on the CPU even though
+                # the compute runs on the GPU/ANE.
+            except Exception as ex:
+                eprint(ex)
+                eprint("Could not create the CoreML encoder session, using the CPU instead")
+                self.encoder = ort.InferenceSession(config.filepaths.encoder_path)
+                self.fp16 = False
 
         else:
             self.encoder = ort.InferenceSession(
@@ -64,7 +93,7 @@ class Encoder:
         except Exception:
             pass
 
-    def generate(self, x: NDArray) -> list[OrtValue]:
+    def generate(self, x: NDArray) -> NDArray:
         if self.fp16:
             self.io_binding.bind_cpu_input("input", x.astype(np.float16))
         else:

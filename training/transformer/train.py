@@ -16,14 +16,23 @@ from transformers import (
 from homr.simple_logging import eprint
 from homr.transformer.configs import Config
 from training.architecture.transformer.tromr_arch import TrOMR, load_model
-from training.datasets.convert_grandstaff import (
+from training.omr_datasets.convert_grandstaff import (
     convert_grandstaff,
     grandstaff_train_index,
 )
-from training.datasets.convert_lieder import convert_lieder, lieder_train_index
-from training.datasets.convert_primus import convert_primus_dataset, primus_train_index
+from training.omr_datasets.convert_lieder import convert_lieder, lieder_train_index
+from training.omr_datasets.convert_musetrainer import (
+    convert_musetrainer,
+    musetrainer_train_index,
+)
+from training.omr_datasets.convert_pdmx import convert_pdmx, pdmx_train_index
+from training.omr_datasets.convert_primus import (
+    convert_primus_dataset,
+    primus_train_index,
+)
 from training.run_id import get_run_id
 from training.transformer.data_loader import label_names, load_dataset
+from training.transformer.distribute import Distribute
 from training.transformer.metrics import HomrTrainer
 from training.transformer.mix_datasets import mix_training_sets
 
@@ -108,12 +117,20 @@ def _check_datasets_are_present(selected_datasets: list[str]) -> list[str]:
 
         if dataset == lieder_train_index and not os.path.exists(lieder_train_index):
             convert_lieder()
+
+        if dataset == musetrainer_train_index and not os.path.exists(musetrainer_train_index):
+            convert_musetrainer()
+
+        if dataset == pdmx_train_index and not os.path.exists(pdmx_train_index):
+            convert_pdmx()
     return selected_datasets
 
 
 def train_transformer(
     fp32: bool = False, resume: str = "", smoke_test: bool = False, fine_tune: bool = False
 ) -> None:
+    distribute = Distribute()
+
     number_of_epochs = 35
     if smoke_test:
         number_of_epochs = 10
@@ -125,26 +142,27 @@ def train_transformer(
     if resume:
         resume_from_checkpoint = os.path.join(git_root, checkpoint_folder, resume)
     elif os.path.exists(os.path.join(git_root, checkpoint_folder)):
-        shutil.rmtree(os.path.join(git_root, checkpoint_folder))
+        if distribute.is_rank0():
+            shutil.rmtree(os.path.join(git_root, checkpoint_folder))
 
-    if smoke_test:
-        number_of_files = -1
-        train_index = load_and_mix_training_sets(
-            _check_datasets_are_present(
-                [lieder_train_index, grandstaff_train_index, primus_train_index]
-            ),
-            [1.0, 1.0, 1.0],
-            number_of_files,
-        )
-    else:
-        number_of_files = -1
-        train_index = load_and_mix_training_sets(
-            _check_datasets_are_present(
-                [lieder_train_index, grandstaff_train_index, primus_train_index]
-            ),
-            [1.0, 1.0, 1.0],
-            number_of_files,
-        )
+    dataset_index = [
+        lieder_train_index,
+        grandstaff_train_index,
+        primus_train_index,
+        pdmx_train_index,
+        musetrainer_train_index,
+    ]
+    dataset_weights = [1.0, 1.0, 1.0, 1.0, 1.0]
+    if distribute.is_rank0():
+        _check_datasets_are_present(dataset_index)
+    distribute.barrier()
+
+    number_of_files = -1
+    train_index = load_and_mix_training_sets(
+        dataset_index,
+        dataset_weights,
+        number_of_files,
+    )
 
     config = Config()
     datasets = load_dataset(train_index, config, val_split=0.1)
@@ -158,7 +176,7 @@ def train_transformer(
 
     run_id = get_run_id()
 
-    batch_size = 6 if fp32 else 18
+    batch_size = 8  # 8gb vram
 
     train_args = TrainingArguments(
         checkpoint_folder,
@@ -167,7 +185,7 @@ def train_transformer(
         save_strategy="epoch",
         learning_rate=1e-5 if fine_tune else 1e-4,
         optim="adamw_torch_fused",
-        gradient_accumulation_steps=4,
+        gradient_accumulation_steps=max(1, 4 // distribute.get_world_size()),
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size // 2,
         num_train_epochs=number_of_epochs,
@@ -202,6 +220,7 @@ def train_transformer(
 
     if os.path.exists(model_destination):
         eprint("Model already exists", model_destination)
+        distribute.destroy()
         return
 
     try:
@@ -215,13 +234,17 @@ def train_transformer(
             train_dataset=datasets["train"],
             eval_dataset=datasets["validation"],
             callbacks=callbacks,
+            distribute=distribute,
         )
 
         trainer.train(resume_from_checkpoint=resume_from_checkpoint)
     except KeyboardInterrupt:
         eprint("Interrupted")
-    torch.save(model.state_dict(), model_destination)
-    eprint(f"Saved model to {model_destination}")
+    if distribute.is_rank0():
+        torch.save(model.state_dict(), model_destination)
+        eprint(f"Saved model to {model_destination}")
+    distribute.barrier()
+    distribute.destroy()
 
 
 if __name__ == "__main__":

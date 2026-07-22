@@ -1,23 +1,42 @@
 import xml.etree.ElementTree as ET
 from typing import Iterable, SupportsIndex, TypeVar, overload
 
-import musicxml.xmlelement.xmlelement as mxl
-from musicxml.parser.parser import _parse_node
-
 from homr.music_xml_generator import DURATION_NAMES
 from homr.simple_logging import eprint
 from homr.transformer.vocabulary import (
+    VALID_TIME_SIGNATURE_DENOMINATORS,
     EncodedSymbol,
     empty,
     has_rhythm_symbol_a_position,
 )
-from training.datasets.staff_merging import (
+from training.omr_datasets.staff_merging import (
     EncodedSymbolWithPos,
     merge_upper_and_lower_staff,
 )
 from training.transformer.training_vocabulary import VocabularyStats, check_token_lines
 
 _T = TypeVar("_T")
+
+
+def _children(el: ET.Element, tag: str) -> list[ET.Element]:
+    return el.findall(tag)
+
+
+def _child(el: ET.Element, tag: str) -> ET.Element | None:
+    return el.find(tag)
+
+
+def _text(el: ET.Element | None, default: str = "") -> str:
+    if el is None or el.text is None:
+        return default
+    return el.text.strip()
+
+
+def _int_text(el: ET.Element | None, default: int = 0) -> int:
+    t = _text(el)
+    if t == "":
+        return default
+    return int(t)
 
 
 class Measure(list[EncodedSymbol]):
@@ -89,6 +108,20 @@ ARTIC_MAPPING: dict[str, str] = {
     "otherOrnament": "",
     "otherArticulation": "",
 }
+
+# Tags inside <articulations> that we don't otherwise special-case.
+_ARTICULATIONS_TAG = "articulations"
+_ORNAMENTS_TAG = "ornaments"
+
+
+def _xml_name_to_camel(tag: str) -> str:
+    """Convert a hyphenated MusicXML tag (e.g. 'strong-accent') to camelCase
+    (e.g. 'strongAccent'), matching what the old musicxml package's class
+    names produced after stripping the XML prefix."""
+    parts = tag.split("-")
+    if len(parts) == 1:
+        return parts[0]
+    return parts[0] + "".join(p[:1].upper() + p[1:] for p in parts[1:] if p)
 
 
 class TokensMeasure:
@@ -228,15 +261,15 @@ class TupletState:
         self.started = False
         self.last_stop_position = -1
 
-    def get_tuplet_factor(self, note: mxl.XMLNote, position: int) -> float:
-        notations = note.get_children_of_type(mxl.XMLNotations)
+    def get_tuplet_factor(self, note: ET.Element, position: int) -> float:
+        notations = _children(note, "notations")
         was_started = self.started or self.last_stop_position == position
         if len(notations) > 0:
-            tuplets = notations[0].get_children_of_type(mxl.XMLTuplet)
-            print_object = notations[0].attributes.get("print-object", None)
+            tuplets = _children(notations[0], "tuplet")
+            print_object = notations[0].get("print-object", None)
             for t in tuplets:
-                t_type = t.attributes.get("type", None)
-                show_number = t.attributes.get("show-number", None)
+                t_type = t.get("type", None)
+                show_number = t.get("show-number", None)
                 if t_type == "start" and show_number != "none" and print_object != "no":
                     self.started = True
                 if t_type == "stop":
@@ -245,21 +278,40 @@ class TupletState:
 
         if not self.started and not was_started:
             return 1.0
-        time_modification = note.get_children_of_type(mxl.XMLTimeModification)
+        time_modification = _children(note, "time-modification")
         if len(time_modification) == 0:
             return 1.0
-        actual_notes = time_modification[0].get_children_of_type(mxl.XMLActualNotes)
+        actual_notes = _children(time_modification[0], "actual-notes")
         if len(actual_notes) == 0:
             return 1.0
-        normal_notes = time_modification[0].get_children_of_type(mxl.XMLNormalNotes)
+        normal_notes = _children(time_modification[0], "normal-notes")
         if len(normal_notes) == 0:
             return 1.0
-        actual = int(actual_notes[0].value_)
-        normal = int(normal_notes[0].value_)
+        actual = _int_text(actual_notes[0])
+        normal = _int_text(normal_notes[0])
         return float(actual) / float(normal)
 
     def on_end_of_measure(self) -> None:
         self.last_stop_position = -1
+
+
+def _measure_rest_rhythm(duration: int, divisions: int) -> str:
+    if divisions <= 0:
+        return "rest_1"
+    quarters = duration / divisions
+    lookup = [
+        (4.0, "rest_1"),
+        (3.0, "rest_2."),
+        (2.0, "rest_2"),
+        (1.5, "rest_4."),
+        (1.0, "rest_4"),
+        (0.75, "rest_8."),
+        (0.5, "rest_8"),
+    ]
+    for q, token in lookup:
+        if abs(quarters - q) < 0.01:
+            return token
+    return "rest_1"
 
 
 class TokensPart:
@@ -268,56 +320,83 @@ class TokensPart:
         self.measures: list[Measure] = []
         self.tuplets = TupletState()
         self.tremolo = False
+        self.divisions: int = 1
+        # Clefs queued by an after-barline declaration in the previous measure,
+        # not yet eligible to be flushed into the current one.
+        self.queued_clefs: dict[int, EncodedSymbol] = {}
+        # Queued clefs that became active once the measure they target started;
+        # still cancellable by an explicit clef in that same measure.
+        self.pending_clefs: dict[int, EncodedSymbol] = {}
+
+    def _ensure_current_measure(self) -> TokensMeasure:
+        """
+        MusicXML may split a measure's attributes across several <attributes>
+        elements, e.g. one with only divisions/time followed by one with the
+        clef. So the clef isn't guaranteed to be the very first symbol.
+        """
+        if self.current_measure is None:
+            self.current_measure = TokensMeasure()
+        return self.current_measure
+
+    def _flush_pending_clefs(self) -> None:
+        if not self.pending_clefs:
+            return
+        current_measure = self._ensure_current_measure()
+        for staff, symbol in self.pending_clefs.items():
+            current_measure.append_symbol_to_staff(staff, symbol)
+        self.pending_clefs = {}
 
     def append_clefs(self, clefs: list[tuple[EncodedSymbol, int]]) -> None:
-        current_measure = self.current_measure
-        if current_measure is not None:
-            for staff, clef in enumerate(clefs):
-                if clef[1] >= 0:
-                    current_measure.append_symbol_to_staff(clef[1], clef[0])
-                else:
-                    current_measure.append_symbol_to_staff(staff, clef[0])
-        else:
-            measure = TokensMeasure()
-            for staff, clef in enumerate(clefs):
-                measure.append_symbol_to_staff(staff, clef[0])
-            self.current_measure = measure
+        resolved = [
+            (clef[1] if clef[1] >= 0 else index, clef[0]) for index, clef in enumerate(clefs)
+        ]
+        # An explicit clef for a staff in this measure overrides any clef
+        # that was queued for it via after-barline in the previous measure.
+        for staff, _ in resolved:
+            self.pending_clefs.pop(staff, None)
+        self._flush_pending_clefs()
+        current_measure = self._ensure_current_measure()
+        for staff, symbol in resolved:
+            current_measure.append_symbol_to_staff(staff, symbol)
+
+    def queue_clefs_for_next_measure(self, clefs: list[tuple[EncodedSymbol, int]]) -> None:
+        """
+        A <clef after-barline="yes"> is printed at the end of the current
+        measure but only takes effect at the start of the next one.
+        """
+        for index, clef in enumerate(clefs):
+            staff = clef[1] if clef[1] >= 0 else index
+            self.queued_clefs[staff] = clef[0]
 
     def append_symbol(self, symbol: EncodedSymbol) -> None:
-        if self.current_measure is None:
-            raise ValueError("Expected to get clefs as first symbol")
-        self.current_measure.append_symbol(symbol)
+        self._flush_pending_clefs()
+        self._ensure_current_measure().append_symbol(symbol)
 
     def mark_new_page(self) -> None:
-        if self.current_measure is None:
-            raise ValueError("Expected to get clefs as first symbol")
-        self.current_measure.mark_new_page()
+        self._flush_pending_clefs()
+        self._ensure_current_measure().mark_new_page()
 
     def append_rest(
         self, staff: int, is_chord: bool, duration: int, invisible: bool, symbol: EncodedSymbol
     ) -> None:
-        if self.current_measure is None:
-            raise ValueError("Expected to get clefs as first symbol")
-        self.current_measure.append_rest(staff, is_chord, duration, invisible, symbol)
+        self._flush_pending_clefs()
+        self._ensure_current_measure().append_rest(staff, is_chord, duration, invisible, symbol)
 
     def append_note(
         self, staff: int, is_chord: bool, duration: int, invisible: bool, symbol: EncodedSymbol
     ) -> None:
-        if self.current_measure is None:
-            raise ValueError("Expected to get clefs as first symbol")
-        self.current_measure.append_note(staff, is_chord, duration, invisible, symbol)
+        self._flush_pending_clefs()
+        self._ensure_current_measure().append_note(staff, is_chord, duration, invisible, symbol)
 
     def append_position_change(self, duration: int) -> None:
-        if self.current_measure is None:
-            raise ValueError("Expected to get clefs as first symbol")
-        self.current_measure.append_position_change(duration)
+        self._flush_pending_clefs()
+        self._ensure_current_measure().append_position_change(duration)
 
     def on_end_of_measure(self) -> None:
-        if self.current_measure is None:
-            raise ValueError("Expected to get clefs as first symbol")
-
-        self.measures.append(self.current_measure.complete_measure())
+        self.measures.append(self._ensure_current_measure().complete_measure())
         self.current_measure = TokensMeasure()
+        self.pending_clefs.update(self.queued_clefs)
+        self.queued_clefs = {}
         self.tuplets.on_end_of_measure()
 
     def get_measures(self) -> list[Measure]:
@@ -328,56 +407,67 @@ class TokensPart:
             return 0
         return self.current_measure.current_position
 
-    def get_tuplet_factor(self, note: mxl.XMLNote, is_chord: bool, duration: int) -> float:
+    def get_tuplet_factor(self, note: ET.Element, is_chord: bool, duration: int) -> float:
         position = self._get_current_position()
         if is_chord:
             position -= duration
         return self.tuplets.get_tuplet_factor(note, position)
 
 
-def _lift_from_pitch_or_accidental(pitch: mxl.XMLPitch, note: mxl.XMLNote) -> str:
+def _lift_from_pitch_or_accidental(pitch: ET.Element, note: ET.Element) -> str:
     # explicit courtesy accidental overrides calculated
-    accs = note.get_children_of_type(mxl.XMLAccidental)
+    accs = _children(note, "accidental")
     if accs:
-        v = accs[0].value_
+        v = _text(accs[0])
         return {"sharp": "#", "flat": "b", "natural": "N"}.get(v, empty)
-    alter = pitch.get_children_of_type(mxl.XMLAlter)
-    if not alter:
+    alter = _child(pitch, "alter")
+    if alter is None:
         return empty
-    val = int(alter[0].value_)
+    val = int(float(_text(alter, "0")))
     return _alter_to_lifts(val)
 
 
-def _count_dots(note: mxl.XMLNote) -> int:
-    dots = note.get_children_of_type(mxl.XMLDot)
+def _count_dots(note: ET.Element) -> int:
+    dots = _children(note, "dot")
     return len(dots)
 
 
-def _process_attributes(part: TokensPart, attribute: mxl.XMLAttributes) -> None:
-    clefs = attribute.get_children_of_type(mxl.XMLClef)
+def _process_attributes(part: TokensPart, attribute: ET.Element) -> None:
+    divs = _children(attribute, "divisions")
+    if len(divs) > 0:
+        part.divisions = _int_text(divs[0], 1) or 1
+    clefs = _children(attribute, "clef")
     if len(clefs) > 0:
         clefs_tokens: list[tuple[EncodedSymbol, int]] = []
+        deferred_clefs_tokens: list[tuple[EncodedSymbol, int]] = []
         for clef in clefs:
-            sign = clef.get_children_of_type(mxl.XMLSign)[0].value_
-            line = clef.get_children_of_type(mxl.XMLLine)[0].value_
-            has_octave_change = len(clef.get_children_of_type(mxl.XMLClefOctaveChange)) > 0
+            sign = _text(_child(clef, "sign"))
+            line = _text(_child(clef, "line"))
+            has_octave_change = _child(clef, "clef-octave-change") is not None
             if has_octave_change:
                 raise ValueError("Octave change isn't supported")
-            clef_number = int(clef.attributes.get("number", "0")) - 1
-            clefs_tokens.append(
-                (EncodedSymbol(f"clef_{sign}{line}", empty, empty, empty), clef_number)
-            )
-        part.append_clefs(clefs_tokens)
-    keys = attribute.get_children_of_type(mxl.XMLKey)
+            clef_number = int(clef.get("number", "1")) - 1
+            token = (EncodedSymbol(f"clef_{sign}{line}", empty, empty, empty, empty), clef_number)
+            if clef.get("after-barline") == "yes":
+                deferred_clefs_tokens.append(token)
+            else:
+                clefs_tokens.append(token)
+        if clefs_tokens:
+            part.append_clefs(clefs_tokens)
+        if deferred_clefs_tokens:
+            part.queue_clefs_for_next_measure(deferred_clefs_tokens)
+    keys = _children(attribute, "key")
+    times = _children(attribute, "time")
     if len(keys) > 0:
-        fifths = keys[0].get_children_of_type(mxl.XMLFifths)[0].value_
+        fifths = _text(_child(keys[0], "fifths"), "0")
         part.append_symbol(EncodedSymbol(f"keySignature_{int(fifths)}"))
-    times = attribute.get_children_of_type(mxl.XMLTime)
     if len(times) > 0:
-        beat_type = times[0].get_children_of_type(mxl.XMLBeatType)[0].value_
+        beat_type = _text(_child(times[0], "beat-type"))
+        if not beat_type.isdigit() or int(beat_type) not in VALID_TIME_SIGNATURE_DENOMINATORS:
+            raise ValueError(f"Unsupported time signature denominator: {beat_type}")
         part.append_symbol(EncodedSymbol(f"timeSignature/{beat_type}"))
 
-    style = attribute.get_children_of_type(mxl.XMLMeasureStyle)
+    style = _children(attribute, "measure-style")
     if len(style) > 0:
         _process_multi_rests(part, style[0])
 
@@ -394,9 +484,9 @@ def _alter_to_lifts(alter: int) -> str:
     return "N"
 
 
-def _pitch_name(pitch: mxl.XMLPitch) -> str:
-    step = pitch.get_children_of_type(mxl.XMLStep)[0].value_
-    octave = pitch.get_children_of_type(mxl.XMLOctave)[0].value_
+def _pitch_name(pitch: ET.Element) -> str:
+    step = _text(_child(pitch, "step"))
+    octave = _text(_child(pitch, "octave"))
     return f"{step}{octave}"
 
 
@@ -406,136 +496,151 @@ def _rhythm_token(base: str, number: int, dots: int, is_grace: bool) -> str:
     return f"{base}_{number}{grace}{dot_str}"
 
 
-def _collect_articulation(note: mxl.XMLNote, part: TokensPart, staff: int) -> str:
-    notations = note.get_children_of_type(mxl.XMLNotations)
-    if not notations:
-        return empty
+def _collect_articulation(note: ET.Element, part: TokensPart, staff: int) -> tuple[str, str]:
+    notations_list = _children(note, "notations")
+    if not notations_list:
+        return empty, empty
+    notations = notations_list[0]
+    if notations.get("print-object", None) == "no":
+        return empty, empty
     articulations = []
+    slurs = []
     # pick the first articulation we support if multiple present
-    for child in notations[0].get_children():
-        print_object = child.attributes.get("print-object", None)
+    for child in list(notations):
+        print_object = child.get("print-object", None)
         invisible = print_object == "no"
-        if isinstance(child, mxl.XMLArticulations) and not invisible:
-            for a in child.get_children():
-                if isinstance(child, mxl.XMLTremolo) and not invisible:
-                    tremolo_type = str(child.attributes.get("type", ""))
+        if child.tag == _ARTICULATIONS_TAG and not invisible:
+            for a in list(child):
+                a_tag = _xml_name_to_camel(a.tag)
+                if a.tag == "tremolo" and not invisible:
+                    tremolo_type = str(a.get("type", ""))
                     part.tremolo = tremolo_type == "start"
                 else:
-                    name = a.__class__.__name__[
-                        3:
-                    ]  # strip XML prefix, e.g., XMLStaccato -> Staccato
-                    name = name[0].lower() + name[1:]
+                    name = a_tag[0].lower() + a_tag[1:]
                     if name in ARTIC_MAPPING:
                         if ARTIC_MAPPING[name]:
                             articulations.append(ARTIC_MAPPING[name])
                     else:
                         articulations.append(name)
-        if isinstance(child, mxl.XMLFermata) and not invisible:
+        if child.tag == "fermata" and not invisible:
             articulations.append("fermata")
-        if isinstance(child, mxl.XMLOrnaments) and not invisible:
-            for o in child.get_children():
-                nm = o.__class__.__name__[3:]
-                nm = nm[0].lower() + nm[1:]
+        if child.tag == _ORNAMENTS_TAG and not invisible:
+            for o in list(child):
+                o_tag = _xml_name_to_camel(o.tag)
+                nm = o_tag[0].lower() + o_tag[1:]
                 if nm in ARTIC_MAPPING:
                     if ARTIC_MAPPING[nm]:
                         articulations.append(ARTIC_MAPPING[nm])
                 else:
                     articulations.append(nm)
-        if isinstance(child, mxl.XMLTuplet):
+        if child.tag == "tuplet":
             # Tuplets are handled by TupletState
             pass
-        if isinstance(child, mxl.XMLArpeggiate):
+        if child.tag == "arpeggiate":
             articulations.append("arpeggiate")
-        if isinstance(child, mxl.XMLTied):
-            tie_type = str(child.attributes.get("type", ""))
-            articulations.append("slur" + tie_type.capitalize())
-        if isinstance(child, mxl.XMLSlur):
-            slur_type = str(child.attributes.get("type", ""))
-            articulations.append("slur" + slur_type.capitalize())
+        if child.tag == "tied":
+            tie_type = str(child.get("type", ""))
+            slurs.append("slur" + tie_type.capitalize())
+        if child.tag == "slur":
+            slur_type = str(child.get("type", ""))
+            slurs.append("slur" + slur_type.capitalize())
 
     if part.tremolo:
         articulations.append("tremolo")
 
     articulations = list(set(articulations))
+    if len(articulations) == 0 and len(slurs) == 0:
+        return empty, empty
+
     if len(articulations) == 0:
-        return empty
-    return str.join("_", sorted(articulations))
+        return empty, str.join("_", sorted(slurs))
+
+    if len(slurs) == 0:
+        return str.join("_", sorted(articulations)), empty
+
+    return str.join("_", sorted(articulations)), str.join("_", sorted(slurs))
 
 
-def _process_note(part: TokensPart, note: mxl.XMLNote) -> None:
+def _process_note(part: TokensPart, note: ET.Element) -> None:
     staff = 0
-    note_heads = note.get_children_of_type(mxl.XMLNotehead)
+    note_heads = _children(note, "notehead")
     for note_head in note_heads:
-        if note_head.value_ == "none":
+        if _text(note_head) == "none":
             # Notehead is not printed
             return
-    staff_nodes = note.get_children_of_type(mxl.XMLStaff)
-    print_object = note.attributes.get("print-object", None)
+    staff_nodes = _children(note, "staff")
+    print_object = note.get("print-object", None)
     invisible = print_object == "no"
     if len(staff_nodes) > 0:
-        staff = int(staff_nodes[0].value_) - 1
-    is_grace = len(note.get_children_of_type(mxl.XMLGrace)) > 0
-    is_chord = len(note.get_children_of_type(mxl.XMLChord)) > 0
-    if len(note.get_children_of_type(mxl.XMLDuration)) == 0:
-        is_grace_note = len(note.get_children_of_type(mxl.XMLGrace)) > 0
+        staff = _int_text(staff_nodes[0], 1) - 1
+    is_grace = _child(note, "grace") is not None
+    is_chord = _child(note, "chord") is not None
+    duration_node = _child(note, "duration")
+    if duration_node is None:
+        is_grace_note = _child(note, "grace") is not None
         if not is_grace_note:
-            eprint("Note without duration", note.get_children())
+            eprint("Note without duration", list(note))
         duration = 0
     else:
         # Note: The duration in MusicXML is in the unit "divisions"
         # divisions are specified in the parts attributes
-        duration = int(note.get_children_of_type(mxl.XMLDuration)[0].value_)
+        duration = _int_text(duration_node)
     triplet_factor = part.get_tuplet_factor(note, is_chord, duration)
-    rest = note.get_children_of_type(mxl.XMLRest)
+    rest = _children(note, "rest")
     dots = _count_dots(note)
-    dur_nodes = note.get_children_of_type(mxl.XMLType)
-    duration_type = dur_nodes[0].value_ if dur_nodes else "eighth"
+    dur_nodes = _children(note, "type")
+    duration_type = _text(dur_nodes[0]) if dur_nodes else "eighth"
     base_duration = round(DURATION_NUMBER[duration_type] * triplet_factor)
-    art = _collect_articulation(note, part, staff)
+    art, slur = _collect_articulation(note, part, staff)
     if len(rest) > 0:
-        if rest[0] and rest[0].attributes.get("measure", None):
+        if rest[0] is not None and rest[0].get("measure", None):
+            rhythm = _measure_rest_rhythm(duration, part.divisions)
             part.append_rest(
-                staff, is_chord, duration, invisible, EncodedSymbol("rest_1", empty, empty, empty)
+                staff,
+                is_chord,
+                duration,
+                invisible,
+                EncodedSymbol(rhythm, empty, empty, empty, empty),
             )
         else:
             rhythm = _rhythm_token("rest", base_duration, dots, is_grace)
-            sym = EncodedSymbol(rhythm, empty, empty, art)
+            sym = EncodedSymbol(rhythm, empty, empty, art, slur)
             part.append_rest(staff, is_chord, duration, invisible, sym)
-    pitch = note.get_children_of_type(mxl.XMLPitch)
+    pitch = _children(note, "pitch")
     if len(pitch) > 0:
         pitch_name = _pitch_name(pitch[0])
         lift = _lift_from_pitch_or_accidental(pitch[0], note)
         rhythm = _rhythm_token("note", base_duration, dots, is_grace)
-        sym = EncodedSymbol(rhythm, pitch_name, lift, art)
+        sym = EncodedSymbol(rhythm, pitch_name, lift, art, slur)
 
         part.append_note(staff, is_chord, max(duration, 1), invisible, sym)
 
 
-def _process_backup(part: TokensPart, backup: mxl.XMLBackup) -> None:
-    backup_value = int(backup.get_children_of_type(mxl.XMLDuration)[0].value_)
+def _process_backup(part: TokensPart, backup: ET.Element) -> None:
+    backup_value = _int_text(_child(backup, "duration"))
     part.append_position_change(-backup_value)
 
 
-def _process_forward(part: TokensPart, backup: mxl.XMLBackup) -> None:
-    forward_value = int(backup.get_children_of_type(mxl.XMLDuration)[0].value_)
+def _process_forward(part: TokensPart, forward: ET.Element) -> None:
+    forward_value = _int_text(_child(forward, "duration"))
     part.append_position_change(forward_value)
 
 
-def _process_barline(part: TokensPart, barline: mxl.XMLBarline) -> None:
+def _process_barline(part: TokensPart, barline: ET.Element) -> None:
     bar_style = ""  # style: light-heavy, light-light, "heave-heavy"
-    bar_style_nodes = barline.get_children_of_type(mxl.XMLBarStyle)
+    bar_style_nodes = _children(barline, "bar-style")
     if len(bar_style_nodes) > 0:
-        bar_style = bar_style_nodes[0].value_
+        bar_style = _text(bar_style_nodes[0])
 
     direction = ""
-    repeat_nodes = barline.get_children_of_type(mxl.XMLRepeat)
+    repeat_nodes = _children(barline, "repeat")
     if len(repeat_nodes) > 0:
-        direction = repeat_nodes[0].attributes.get("direction", "")
+        direction = repeat_nodes[0].get("direction", "")
 
     ending = ""
-    ending_nodes = barline.get_children_of_type(mxl.XMLEnding)
+    ending_nodes = _children(barline, "ending")
     if len(ending_nodes) > 0:
-        ending = ending_nodes[0].attributes.get("type", "")
+        ending = ending_nodes[0].get("type", "")
 
     if direction == "forward":
         part.append_symbol(EncodedSymbol("repeatStart"))
@@ -557,42 +662,55 @@ def _process_barline(part: TokensPart, barline: mxl.XMLBarline) -> None:
         part.append_symbol(EncodedSymbol("voltaStart"))
 
 
-def _process_print(part: TokensPart, xmlprint: mxl.XMLPrint) -> None:
-    new_page = xmlprint.attributes.get("new-page", "")
+def _process_print(part: TokensPart, xmlprint: ET.Element) -> None:
+    new_page = xmlprint.get("new-page", "")
     if new_page == "yes":
         part.mark_new_page()
 
 
-def _process_multi_rests(part: TokensPart, measure_style: mxl.XMLMeasureStyle) -> None:
-    rests = measure_style.get_children_of_type(mxl.XMLMultipleRest)
+def _process_direction(part: TokensPart, xmldirection: ET.Element) -> None:
+    for direction_type in _children(xmldirection, "direction-type"):
+        has_octave_shift = _child(direction_type, "octave-shift") is not None
+        if has_octave_shift:
+            raise ValueError("Octave shift isn't supported")
+
+
+def _process_multi_rests(part: TokensPart, measure_style: ET.Element) -> None:
+    rests = _children(measure_style, "multiple-rest")
     if len(rests) == 0:
         return
     rest = rests[0]
-    rest_duration = min(rest.value_, 10)
-    part.append_symbol(EncodedSymbol(f"rest_{rest_duration}m", empty, empty, empty, "upper"))
+    rest_duration = min(_int_text(rest), 10)
+    part.append_symbol(EncodedSymbol(f"rest_{rest_duration}m", empty, empty, empty, empty, "upper"))
 
 
-def _music_part_to_tokens(part: mxl.XMLPart) -> list[Measure]:
+def _music_part_to_tokens(part: ET.Element) -> list[Measure]:
     tokens = TokensPart()
-    for measure in part.get_children_of_type(mxl.XMLMeasure):
-        for child in measure.get_children():
-            if isinstance(child, mxl.XMLAttributes):
+    for measure in _children(part, "measure"):
+        for child in list(measure):
+            if child.tag == "attributes":
                 _process_attributes(tokens, child)
-            if isinstance(child, mxl.XMLNote):
+            if child.tag == "note":
                 _process_note(tokens, child)
-            if isinstance(child, mxl.XMLBackup):
+            if child.tag == "backup":
                 _process_backup(tokens, child)
-            if isinstance(child, mxl.XMLForward):
+            if child.tag == "forward":
                 _process_forward(tokens, child)
-            if isinstance(child, mxl.XMLBarline):
+            if child.tag == "barline":
                 _process_barline(tokens, child)
-            if isinstance(child, mxl.XMLPrint):
+            if child.tag == "print":
                 _process_print(tokens, child)
+            if child.tag == "direction":
+                _process_direction(tokens, child)
         tokens.on_end_of_measure()
     return _cleanup_barlines_and_repeats(tokens.get_measures())
 
 
 def _cleanup_barlines_and_repeats(measures: list[Measure]) -> list[Measure]:
+    """
+    Normalize measure-ending barlines and adjacent repeat symbols.
+    """
+
     def is_barline_or_repeat(symbol: EncodedSymbol) -> bool:
         return "barline" in symbol.rhythm or "repeat" in symbol.rhythm
 
@@ -646,10 +764,10 @@ def _cleanup_barlines_and_repeats(measures: list[Measure]) -> list[Measure]:
 def _music_xml_element_to_symbols(
     root: ET.Element,
 ) -> list[list[Measure]]:
-    _remove_dynamics_attribute_from_nodes_recursive(root)
-    parsed = _parse_node(root)
+    # Support both <score-partwise> as the root and as a wrapped document.
+    score_root = root
     result: list[list[Measure]] = []
-    for part in parsed.get_children_of_type(mxl.XMLPart):
+    for part in _children(score_root, "part"):
         tokens = _music_part_to_tokens(part)
         result.append(tokens)
     return result
@@ -668,31 +786,6 @@ def music_xml_file_to_tokens(file_path: str) -> list[list[Measure]]:
     with open(file_path, "rb") as f:
         xml = ET.parse(f)  # noqa: S314
     return _music_xml_element_to_symbols(xml.getroot())
-
-
-def _remove_dynamics_attribute_from_nodes_recursive(node: ET.Element) -> None:
-    """
-    We don't need the dynamics attribute in the XML, but XSD validation
-    sometimes fails if its negative. So we remove it.
-
-    Also strips unwanted nodes (and their children) entirely.
-    """
-    if "dynamics" in node.attrib:
-        del node.attrib["dynamics"]
-    filtered_tags = {
-        "metronome",
-        "ending",
-        "direction",
-        "identification",
-        "miscellaneous",
-        "defaults",
-        "credit",
-    }
-    for child in list(node):
-        if child.tag in filtered_tags:
-            node.remove(child)
-        else:
-            _remove_dynamics_attribute_from_nodes_recursive(child)
 
 
 if __name__ == "__main__":

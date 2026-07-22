@@ -12,6 +12,13 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
+from homr.onnx_providers import (
+    coreml_available,
+    coreml_mlprogram_providers,
+    cuda_available,
+    dml_available,
+    gpu_providers,
+)
 from homr.segmentation.config import (
     segmentation_version,
     segnet_path_onnx,
@@ -28,25 +35,63 @@ class Segnet:
         _sess_opts.log_severity_level = 3  # 仅显示 ERROR，抑制 WARNING/INFO（含 Conv Fallback 等）
         _sess_opts.intra_op_num_threads = _ORT_INTRA_THREADS  # 限制单算子并行线程
         _sess_opts.inter_op_num_threads = 1                   # 算子间串行执行
-        if use_gpu_inference:
+        if use_gpu_inference and (cuda_available() or dml_available()):
             try:
                 # I had this issue: https://github.com/microsoft/onnxruntime/issues/21684
-                # If torch is installed, this fixes "libcudnn.so.9: cannot open shared object file"
+                # If torch is installed, this fixes
+                # "libcudnn.so.9: cannot open shared object file"
                 ort.preload_dlls()
+                providers, _device = gpu_providers()
                 self.model = ort.InferenceSession(
                     segnet_path_onnx_fp16,
                     sess_options=_sess_opts,
-                    providers=["DmlExecutionProvider"],
+                    providers=providers,
                 )
                 self.fp16 = True
+                # Segnet always binds its output on the CPU, so use_gpu only needs to track
+                # that a GPU provider is active (used for logging/diagnostics).
                 self.use_gpu = True
-            except Exception:
+            except Exception as e:
+                eprint(
+                    "Error while trying to load model on the GPU. You probably don't have a compatible gpu"  # noqa: E501
+                )
+                eprint(e)
                 self.model = ort.InferenceSession(
                     segnet_path_onnx_fp16,
                     sess_options=_sess_opts,
                     providers=["CPUExecutionProvider"],
                 )
                 self.fp16 = True
+        elif use_gpu_inference and coreml_available():
+            try:
+                # CPUAndGPU skips the (slow, CPU-bound) ANE specialization that
+                # "ALL" performs at session creation and on the first inference.
+                # Steady-state batches are slightly slower than with "ALL", but
+                # a session only lives for one image, so the warmup dominates
+                # (measured on an M1: ~1.9 s vs ~2.6 s for a 4-staff page).
+                self.model = ort.InferenceSession(
+                    segnet_path_onnx_fp16,
+                    providers=coreml_mlprogram_providers(
+                        segnet_path_onnx_fp16, compute_units="CPUAndGPU"
+                    ),
+                )
+                self.fp16 = True
+                self.use_gpu = True
+            except Exception as e:
+                eprint("Error while trying to load model on CoreML, falling back to the CPU")
+                eprint(e)
+                if os.path.exists(segnet_path_onnx):
+                    self.model = ort.InferenceSession(segnet_path_onnx)
+                    self.fp16 = False
+                else:
+                    self.model = ort.InferenceSession(segnet_path_onnx_fp16)
+                    self.fp16 = True
+        elif use_gpu_inference:
+            # --gpu force without a GPU execution provider: only the fp16 model
+            # has been downloaded, run it on the CPU.
+            eprint("No GPU execution provider available, running on the CPU instead")
+            self.model = ort.InferenceSession(segnet_path_onnx_fp16)
+            self.fp16 = True
         else:
             self.model = ort.InferenceSession(
                 segnet_path_onnx,

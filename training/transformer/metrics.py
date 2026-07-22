@@ -3,9 +3,11 @@ from collections import defaultdict
 from typing import Any
 
 import torch
+import torch.distributed as dist
 from torch import Tensor
 from transformers import Trainer
 
+from training.transformer.distribute import Distribute
 from training.transformer.training_vocabulary import map_rhythm_symbol_with_position
 
 LOSS_COMPONENTS = [
@@ -15,6 +17,7 @@ LOSS_COMPONENTS = [
     "loss_consist",
     "loss_position",
     "loss_articulations",
+    "loss_slurs",
 ]
 
 
@@ -25,8 +28,10 @@ class HomrTrainer(Trainer):
     and overall token-weighted (micro) accuracy.
     """
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, distribute: Distribute, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+
+        self._distribute = distribute
 
         # Training loss accumulators
         self._loss_sum: dict[str, float] = defaultdict(float)
@@ -93,7 +98,12 @@ class HomrTrainer(Trainer):
         # Accumulate per-branch accuracy stats
         self._accumulate_accuracy(outputs, inputs)
 
-        loss = outputs["loss"].mean().detach().cpu()
+        if not self._distribute.enabled:
+            loss = outputs["loss"].mean().detach().cpu()
+        else:
+            # when using distributed training, loss on each device should be gathered,
+            # which can only run on gpu
+            loss = outputs["loss"].mean().detach()
         return loss, None, None
 
     def _accumulate_accuracy(
@@ -101,7 +111,7 @@ class HomrTrainer(Trainer):
         outputs: dict[str, Any],
         inputs: dict[str, torch.Tensor],
     ) -> None:
-        rhythm, pitch, lift, position, articulations = outputs["logits"]
+        rhythm, pitch, lift, position, articulations, slurs = outputs["logits"]
         # Pull binary mask from inputs and align with y_out (shift by 1)
         eval_mask = inputs["mask"][:, 1:]
 
@@ -116,6 +126,7 @@ class HomrTrainer(Trainer):
             ("lift", lift, inputs["lifts"]),
             ("position", position, inputs["positions"]),
             ("articulations", articulations, inputs["articulations"]),
+            ("slurs", slurs, inputs["slurs"]),
         ]
 
         for name, logits, input_labels in branches:
@@ -148,6 +159,20 @@ class HomrTrainer(Trainer):
                 self._acc_correct["pitch_nonposRhy"] += int((is_correct & is_nonpos).sum().item())
                 self._acc_total["pitch_nonposRhy"] += int(is_nonpos.sum().item())
 
+    def _all_reduce(self, d: dict[str, float]) -> None:
+        if not self._distribute.enabled or not d:
+            return
+
+        keys = sorted(d.keys())
+        tensor = torch.tensor(
+            [float(d[k]) for k in keys],
+            dtype=torch.float64,
+            device=torch.cuda.current_device(),
+        )
+        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+        for i, k in enumerate(keys):
+            d[k] = tensor[i].item()
+
     def evaluation_loop(self, *args, metric_key_prefix="eval", **kwargs):  # type: ignore
         # Reset eval accumulators
         self._eval_loss_sum.clear()
@@ -160,6 +185,14 @@ class HomrTrainer(Trainer):
             metric_key_prefix=metric_key_prefix,
             **kwargs,
         )
+
+        for accumulator in [
+            self._eval_loss_sum,
+            self._eval_loss_count,
+            self._acc_correct,
+            self._acc_total,
+        ]:
+            self._all_reduce(accumulator)
 
         # Per-component eval losses
         for k in LOSS_COMPONENTS:

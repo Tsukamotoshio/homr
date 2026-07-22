@@ -1,7 +1,8 @@
 import difflib
+import xml.etree.ElementTree as ET
 
 from homr.music_xml_generator import XmlGeneratorArguments, generate_xml
-from training.datasets.music_xml_parser import music_xml_file_to_tokens
+from training.omr_datasets.music_xml_parser import music_xml_file_to_tokens
 from training.transformer.training_vocabulary import read_tokens, token_lines_to_str
 
 
@@ -10,7 +11,7 @@ def validate_conversion(file: str) -> bool:
     tmp = file.replace(".tokens", ".musicxml.tmp")
 
     xml = generate_xml(XmlGeneratorArguments(None, None, None), [expected], "")
-    xml.write(tmp)
+    ET.ElementTree(xml).write(tmp, encoding="unicode", xml_declaration=True)
 
     actual = music_xml_file_to_tokens(tmp)
     flat_list = [x for xxs in actual for xs in xxs for x in xs]

@@ -10,6 +10,8 @@ from homr.simple_logging import eprint
 nonote = "."
 empty = "_"  # used for decorations on note, if there is no decoration
 
+VALID_TIME_SIGNATURE_DENOMINATORS = [1, 2, 3, 4, 6, 8, 12, 16, 32, 48]
+
 
 def build_dict(tokens: Iterable[str]) -> dict[str, int]:
     result = {}
@@ -44,10 +46,11 @@ def build_rhythm() -> dict[str, int]:
     rhythm.extend([f"clef_F{c}" for c in range(3, 6)])
     rhythm.extend([f"clef_C{c}" for c in range(1, 6)])
     rhythm.extend([f"clef_G{c}" for c in range(1, 3)])
+    rhythm.append("clef_TAB5")
 
     # signatures
     rhythm.extend([f"keySignature_{c}" for c in range(-7, 8)])
-    rhythm.extend([f"timeSignature/{c}" for c in [1, 2, 3, 4, 6, 8, 12, 16, 32, 48]])
+    rhythm.extend([f"timeSignature/{c}" for c in VALID_TIME_SIGNATURE_DENOMINATORS])
 
     # rhythm, kern durations are based on https://www.humdrum.org/rep/kern/
     rhythm.extend([f"rest_{c}m" for c in range(2, 11)])  # multirests
@@ -65,9 +68,6 @@ def build_rhythm() -> dict[str, int]:
     rhythm.extend([f"note_{d}" for d in irregular_durations])
     rhythm.extend([f"rest_{d}" for d in kern_values])
     rhythm.extend([f"rest_{d}" for d in irregular_durations])
-
-    # Note relations (https://en.wikipedia.org/wiki/List_of_musical_symbols)
-    rhythm.extend(["tieSlur"])  #  "gliss"
 
     # Dynamics
     # rhythm.extend(
@@ -107,128 +107,73 @@ def build_articulation() -> dict[str, int]:
         "accent",
         "accent_arpeggiate",
         "accent_arpeggiate_fermata",
-        "accent_arpeggiate_slurStart",
-        "accent_arpeggiate_slurStart_staccato",
-        "accent_arpeggiate_slurStart_tenuto",
-        "accent_arpeggiate_slurStop",
-        "accent_arpeggiate_slurStop_staccato",
-        "accent_arpeggiate_slurStop_tenuto",
         "accent_arpeggiate_staccato",
         "accent_arpeggiate_tenuto",
         "accent_breathMark",
         "accent_breathMark_fermata",
-        "accent_breathMark_slurStart",
-        "accent_breathMark_slurStop",
         "accent_fermata",
-        "accent_fermata_slurStart",
-        "accent_fermata_slurStop",
-        "accent_fermata_staccato",
-        "accent_slurStart",
-        "accent_slurStart_slurStop",
-        "accent_slurStart_slurStop_tenuto",
-        "accent_slurStart_slurStop_trill",
-        "accent_slurStart_staccato",
-        "accent_slurStart_tenuto",
-        "accent_slurStart_tremolo",
-        "accent_slurStart_trill",
-        "accent_slurStop",
-        "accent_slurStop_staccato",
-        "accent_slurStop_tenuto",
-        "accent_slurStop_tremolo",
-        "accent_slurStop_trill",
+        "accent_fermata_tremolo",
         "accent_staccatissimo",
         "accent_staccato",
         "accent_staccato_tenuto",
+        "accent_staccato_tremolo",
+        "accent_staccato_trill",
         "accent_tenuto",
         "accent_tremolo",
         "accent_trill",
         "arpeggiate",
-        "arpeggiate_breathMark_fermata",
+        "arpeggiate_breathMark",
         "arpeggiate_fermata",
-        "arpeggiate_fermata_slurStart",
-        "arpeggiate_fermata_slurStop",
         "arpeggiate_fermata_staccato",
-        "arpeggiate_slurStart",
-        "arpeggiate_slurStart_slurStop",
-        "arpeggiate_slurStart_staccatissimo",
-        "arpeggiate_slurStart_staccato",
-        "arpeggiate_slurStart_staccato_tenuto",
-        "arpeggiate_slurStart_tenuto",
-        "arpeggiate_slurStart_tremolo",
-        "arpeggiate_slurStop",
-        "arpeggiate_slurStop_staccatissimo",
-        "arpeggiate_slurStop_staccato",
-        "arpeggiate_slurStop_tenuto",
+        "arpeggiate_fermata_tenuto",
         "arpeggiate_staccatissimo",
+        "arpeggiate_staccatissimo_staccato",
         "arpeggiate_staccato",
         "arpeggiate_staccato_tenuto",
         "arpeggiate_tenuto",
         "arpeggiate_tremolo",
+        "arpeggiate_trill",
         "breathMark",
         "breathMark_fermata",
-        "breathMark_fermata_slurStop",
         "breathMark_fermata_tenuto",
-        "breathMark_slurStart",
-        "breathMark_slurStop",
-        "breathMark_slurStop_staccato",
-        "breathMark_slurStop_trill",
         "breathMark_staccato",
         "breathMark_tenuto",
+        "breathMark_tremolo",
+        "breathMark_trill",
         "fermata",
-        "fermata_slurStart",
-        "fermata_slurStart_slurStop",
-        "fermata_slurStart_slurStop_trill",
-        "fermata_slurStart_trill",
-        "fermata_slurStop",
-        "fermata_slurStop_staccato",
-        "fermata_slurStop_tenuto",
-        "fermata_slurStop_tremolo",
-        "fermata_slurStop_trill",
-        "fermata_slurStop_turn",
         "fermata_staccato",
-        "fermata_staccato_tenuto",
         "fermata_tenuto",
         "fermata_tremolo",
         "fermata_trill",
-        "slurStart",
-        "slurStart_slurStop",
-        "slurStart_slurStop_staccato",
-        "slurStart_slurStop_staccato_tenuto",
-        "slurStart_slurStop_tenuto",
-        "slurStart_slurStop_tremolo",
-        "slurStart_slurStop_trill",
-        "slurStart_slurStop_turn",
-        "slurStart_staccatissimo",
-        "slurStart_staccato",
-        "slurStart_staccato_tenuto",
-        "slurStart_tenuto",
-        "slurStart_tremolo",
-        "slurStart_trill",
-        "slurStart_turn",
-        "slurStop",
-        "slurStop_staccatissimo",
-        "slurStop_staccato",
-        "slurStop_staccato_tenuto",
-        "slurStop_tenuto",
-        "slurStop_tremolo",
-        "slurStop_trill",
-        "slurStop_turn",
-        "spiccato",
+        "fermata_turn",
         "staccatissimo",
+        "staccatissimo_staccato",
+        "staccatissimo_staccato_tenuto",
+        "staccatissimo_staccato_tenuto_trill",
+        "staccatissimo_tenuto",
         "staccato",
         "staccato_tenuto",
         "staccato_tremolo",
         "staccato_trill",
         "staccato_turn",
         "tenuto",
+        "tenuto_tremolo",
+        "tenuto_trill",
         "tremolo",
         "trill",
+        "trill_turn",
         "turn",
     ]
 
     articulation.extend(articulations_lieder)
 
     return build_dict(articulation)
+
+
+def build_slur() -> dict[str, int]:
+    slur = [nonote, empty]
+    slur.extend(["slurStart_slurStop", "slurStart", "slurStop"])
+    return build_dict(slur)
 
 
 def build_pitch() -> dict[str, int]:
@@ -249,6 +194,7 @@ class Vocabulary:
         self.lift = build_lift()
         self.articulation = build_articulation()
         self.pitch = build_pitch()
+        self.slur = build_slur()
         self.position = build_position()
 
 
@@ -340,6 +286,7 @@ class EncodedSymbol:
         pitch: str = nonote,
         lift: str = nonote,
         articulation: str = nonote,
+        slur: str = nonote,
         position: str = nonote,
         coordinates: tuple[float, float] | None = None,
     ) -> None:
@@ -347,6 +294,7 @@ class EncodedSymbol:
         self.pitch = pitch
         self.lift = lift
         self.articulation = articulation
+        self.slur = slur
         self.position = position
 
         # These coordinates are derived from transformer attention and are inherently imprecise,
@@ -397,7 +345,10 @@ class EncodedSymbol:
 
     def is_valid(self) -> bool:
         has_position = has_rhythm_symbol_a_position(self.rhythm)
-        is_note = [s != nonote for s in [self.lift, self.articulation, self.pitch, self.position]]
+        is_note = [
+            s != nonote
+            for s in [self.lift, self.articulation, self.pitch, self.slur, self.position]
+        ]
         return all(item == has_position for item in is_note)
 
     def add_articulations(self, articulations: list[str]) -> "EncodedSymbol":
@@ -408,9 +359,19 @@ class EncodedSymbol:
         result.articulation = str.join("_", sorted(all_articulations))
         return result
 
+    def add_slurs(self, slurs: list[str]) -> "EncodedSymbol":
+        all_slurs = []
+        all_slurs.extend(slurs)
+        all_slurs.extend([a for a in self.slur.split("_") if a])
+        result = copy.copy(self)
+        result.slur = str.join("_", sorted(all_slurs))
+        return result
+
     def strip_articulations(
         self, to_be_removed: list[str], remove_all: bool = False
     ) -> tuple[list[str], "EncodedSymbol"]:
+        if self.articulation == nonote and not has_rhythm_symbol_a_position(self.rhythm):
+            return [], copy.copy(self)
         stripped = []
         remaining = []
         for articulation in self.articulation.split("_"):
@@ -425,6 +386,28 @@ class EncodedSymbol:
             result.articulation = str.join("_", remaining)
         else:
             result.articulation = empty
+
+        return stripped, result
+
+    def strip_slurs(
+        self, to_be_removed: list[str], remove_all: bool = False
+    ) -> tuple[list[str], "EncodedSymbol"]:
+        if self.slur == nonote and not has_rhythm_symbol_a_position(self.rhythm):
+            return [], copy.copy(self)
+        stripped = []
+        remaining = []
+        for slur in self.slur.split("_"):
+            if not slur:
+                continue
+            if remove_all or slur in to_be_removed:
+                stripped.append(slur)
+            else:
+                remaining.append(slur)
+        result = copy.copy(self)
+        if remaining:
+            result.slur = str.join("_", remaining)
+        else:
+            result.slur = empty
 
         return stripped, result
 
@@ -446,7 +429,9 @@ class EncodedSymbol:
         return duration
 
     def __str__(self) -> str:
-        return str.join(" ", (self.rhythm, self.pitch, self.lift, self.articulation, self.position))
+        return str.join(
+            " ", (self.rhythm, self.pitch, self.lift, self.articulation, self.slur, self.position)
+        )
 
     def __repr__(self) -> str:
         return str(self)
@@ -458,13 +443,16 @@ class EncodedSymbol:
                 and self.pitch == __value.pitch
                 and self.lift == __value.lift
                 and self.articulation == __value.articulation
+                and self.slur == __value.slur
                 and self.position == __value.position
             )
         else:
             return False
 
     def __hash__(self) -> int:
-        return hash((self.rhythm, self.pitch, self.lift, self.articulation, self.position))
+        return hash(
+            (self.rhythm, self.pitch, self.lift, self.articulation, self.slur, self.position)
+        )
 
     def __lt__(self, other: object) -> bool:
         if not isinstance(other, EncodedSymbol):
@@ -673,14 +661,15 @@ if __name__ == "__main__":
     eprint("Lift=", json.dumps(vocab.lift, indent=2))
     eprint("Articulation=", json.dumps(vocab.articulation, indent=2))
     eprint("Pitch=", json.dumps(vocab.pitch, indent=2))
+    eprint("Slurs=", json.dumps(vocab.slur, indent=2))
     eprint("Positions=", json.dumps(vocab.position, indent=2))
 
     valid_combinations = []
 
-    for r, li, a, p, pos in itertools.product(
-        vocab.rhythm, vocab.lift, vocab.articulation, vocab.pitch, vocab.position
+    for r, li, a, p, sl, pos in itertools.product(
+        vocab.rhythm, vocab.lift, vocab.articulation, vocab.pitch, vocab.slur, vocab.position
     ):
-        symbol = EncodedSymbol(r, li, a, p, pos)
+        symbol = EncodedSymbol(r, li, a, p, sl, pos)
         is_valid = symbol.is_valid()
         if not is_valid:
             continue

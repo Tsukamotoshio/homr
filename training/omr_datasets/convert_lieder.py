@@ -1,7 +1,11 @@
+# ruff: noqa: E402
+
+import hashlib
 import json
 import multiprocessing
 import os
 import platform
+import re
 import shutil
 import stat
 import subprocess
@@ -16,12 +20,12 @@ from homr.circle_of_fifths import strip_naturals
 from homr.download_utils import download_file, unzip_file
 from homr.simple_logging import eprint
 from homr.transformer.vocabulary import EncodedSymbol, empty
-from training.datasets.musescore_svg import (
+from training.omr_datasets.musescore_svg import (
     SvgMusicFile,
     SvgStaff,
     get_position_from_multiple_svg_files,
 )
-from training.datasets.music_xml_parser import Measure, music_xml_file_to_tokens
+from training.omr_datasets.music_xml_parser import Measure, music_xml_file_to_tokens
 from training.transformer.training_vocabulary import (
     calc_ratio_of_tuplets,
     token_lines_to_str,
@@ -116,11 +120,27 @@ def copy_all_mscx_files(working_dir: str, dest: str) -> None:
                 shutil.copyfile(source, os.path.join(dest, file))
 
 
-def create_formats(source_file: str, formats: list[str]) -> list[dict[str, str]]:
+def create_formats(
+    source_file: str, formats: list[str], style_file: str | None = None
+) -> list[dict[str, str]]:
     jobs: list[dict[str, str]] = []
 
-    # List of files where MuseScore seems to hang up
-    files_with_known_issues = ["sq8940236"]
+    # sq8940236: MuseScore seems to hang up
+    # lc5001945: nested tuplet, not good for training
+    # lc6209608, lc6236149: empty&invisible staff in the very first system
+    # lc6162644: irregular staff in the last svg page
+    # lc6420897: page 9, measure 49 and 50 are hard to read
+    # lc6196804: lc6196804-3-4.tokens has a strange `arpeggiate_breathMark`,
+    # which will cause error in training, skip for now
+    files_with_known_issues = [
+        "sq8940236",
+        "lc5001945",
+        "lc6162644",
+        "lc6209608",
+        "lc6236149",
+        "lc6420897",
+        "lc6196804",
+    ]
     if any(issue in source_file for issue in files_with_known_issues):
         return jobs
     for target_format in formats:
@@ -135,8 +155,182 @@ def create_formats(source_file: str, formats: list[str]) -> list[dict[str, str]]
             "in": source_file,
             "out": out_name,
         }
+        if style_file is not None:
+            job["style"] = style_file
         jobs.append(job)
     return jobs
+
+
+# Every Lieder page is rendered by MuseScore with its default "Leland" engraving font,
+# so the model only ever sees one glyph vocabulary for noteheads/clefs/accidentals/etc.
+# MuseScore ships several other SMuFL-compliant engraving fonts (selectable in the app
+# under Format > Style > Score > Musical Symbols, backed by a swappable <musicalSymbolFont>
+# style setting); rotating through them per piece costs nothing at render time and gives
+# the model exposure to multiple glyph "handwritings" without needing a different dataset
+# or renderer. This only varies glyph shapes, not MuseScore's own layout/spacing engine -
+# so it doesn't substitute for training on genuinely different renderers (Primus,
+# grandstaff), just cheaply widens the glyph diversity within Lieder itself.
+_MUSIC_FONTS = ["Leland", "Bravura", "Petaluma", "MuseJazz", "Gonville"]
+_music_font_style_dir = os.path.join(dataset_root, "MuseScoreStyles")
+
+
+def _music_font_style_file(font: str) -> str:
+    return os.path.join(_music_font_style_dir, f"{font.replace(' ', '_')}.mss")
+
+
+def _ensure_music_font_style_files() -> None:
+    """
+    Writes one minimal .mss style file per font in _MUSIC_FONTS (skipping ones that
+    already exist), each just pointing MuseScore's musical-symbol and musical-text
+    fonts at a single named font pair - MuseScore fills in every other style default.
+    The "<Font> Text" naming for the paired text font mirrors the font-pair names
+    MuseScore itself uses for its bundled fonts.
+    """
+    os.makedirs(_music_font_style_dir, exist_ok=True)
+    for font in _MUSIC_FONTS:
+        path = _music_font_style_file(font)
+        if os.path.exists(path):
+            continue
+        content = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<museScore version="4.00">\n'
+            "  <Style>\n"
+            f"    <musicalSymbolFont>{font}</musicalSymbolFont>\n"
+            f"    <musicalTextFont>{font} Text</musicalTextFont>\n"
+            "  </Style>\n"
+            "</museScore>\n"
+        )
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+
+def _music_font_for_file(source_file: str) -> str:
+    """
+    Deterministic per-piece font choice (stable across reruns/partial recreates, so a
+    piece doesn't silently re-render with a different font the next time this is run)
+    based on a hash of the piece's own filename, not path or run order.
+    """
+    stem = os.path.basename(source_file).split(".")[0]
+    index = int(hashlib.sha256(stem.encode()).hexdigest(), 16) % len(_MUSIC_FONTS)
+    return _MUSIC_FONTS[index]
+
+
+"""
+In mscx file, tuplet can be set invisible via the following ways:
+1. <Tuplet( id="...")>
+     <visible>0</visible>
+   </Tuplet>
+    this is equal to <notations print-object="no"> in musicXML
+2. <numberType>2</numberType>
+    this is equal to <tuplet show-number="none" ...> in musicXML
+3. <bracketType>2</bracketType>
+    this is equal to <tuplet bracket="no" ...> in musicXML
+4. numberType & bracketType can be set globally via <tupletNumberType> & <tupletBracketType>
+
+recommend reading lc5033057 from Lieder to better understand the rules about tuplet visibility.
+"""
+
+
+def _make_tuplet_visible(mscx_file: str) -> None:
+    with open(mscx_file, encoding="utf-8") as f:
+        content = f.read()
+
+    # match: <visible>0</visible> or <numberType>2</numberType>
+    # or <bracketType>2</bracketType>
+    strip_re = re.compile(
+        r"[ \t]*<(?:visible>0|numberType>2|bracketType>2)"
+        r"</(?:visible|numberType|bracketType)>[ \t]*\r?\n"
+    )
+
+    def strip_hidden(match: "re.Match[str]") -> str:
+        return strip_re.sub("", match.group(0))
+
+    # match within <Tuplet> ... </Tuplet>
+    new_content = re.sub(
+        r"<Tuplet(?:\s[^>]*)?>.*?</Tuplet>", strip_hidden, content, flags=re.DOTALL
+    )
+
+    # match globally: <tupletNumberType>2</tupletNumberType>
+    # or <tupletBracketType>2</tupletBracketType>
+    new_content = re.sub(
+        r"[ \t]*<(?:tupletNumberType|tupletBracketType)>2"
+        r"</(?:tupletNumberType|tupletBracketType)>[ \t]*\r?\n",
+        "",
+        new_content,
+    )
+
+    if new_content != content:
+        with open(mscx_file, "w", encoding="utf-8") as f:
+            f.write(new_content)
+
+
+def _make_staff_visible(mscx_file: str) -> None:
+    """
+    When rendering SVG, MuseScore can hide empty staff.
+    This will cause problem in SvgMusicFile.merge_voice_with_next_one(), because the merge procedure
+    assumes that all staffs are visible and deals with the staff one by one.
+
+    To avoid hiding empty staff, we need to change the following 3 settings:
+      * the global setting: <hideEmptyStaves>1</hideEmptyStaves>
+      * the per-staff setting: <hideWhenEmpty>1</hideWhenEmpty>
+      * <cutaway>1</cutaway>: this hides part of the staff, e.g. some empty measures.
+
+    Note: unfortunatelly, this does not cover every case.
+    lc6236149, lc6209608 still fails, so we just skip them.
+    """
+    with open(mscx_file, encoding="utf-8") as f:
+        content = f.read()
+
+    new_content = re.sub(
+        r"<hideEmptyStaves>1</hideEmptyStaves>",
+        "<hideEmptyStaves>0</hideEmptyStaves>",
+        content,
+    )
+    new_content = re.sub(
+        r"<hideWhenEmpty>1</hideWhenEmpty>",
+        "<hideWhenEmpty>0</hideWhenEmpty>",
+        new_content,
+    )
+    new_content = re.sub(
+        r"<cutaway>1</cutaway>",
+        "<cutaway>0</cutaway>",
+        new_content,
+    )
+
+    if new_content != content:
+        with open(mscx_file, "w", encoding="utf-8") as f:
+            f.write(new_content)
+
+
+def _reset_note_positions(mscx_file: str) -> None:
+    """
+    A manually-dragged notehead in MuseScore leaves a <pos x=".." y=".."/> override
+    as the first child of its <Note> element, which shifts where it renders without
+    touching its <pitch>. This is rare (~0.015% of notes dataset-wide) but when it
+    happens, the rendered position can silently disagree with the note's own pitch -
+    e.g. in lc4926375 a repeated E5 renders on the D5 line because of a y="0.5" (one
+    diatonic step) override, so the exported image shows a different note than the
+    label says.
+
+    <pos> is also used pervasively elsewhere in this format for unrelated, legitimate
+    purposes - slur/tie curve control points (nested under <Note><Tie><SlurSegment>),
+    augmentation-dot offsets (<Note><NoteDot>), staff text, tempo marks, stems - so
+    this only strips a <pos> that is directly the first thing inside <Note>, never one
+    nested deeper. MuseScore also serializes an empty element as either a self-closing
+    tag or a separate open/close pair depending on context, so both forms are matched.
+    """
+    with open(mscx_file, encoding="utf-8") as f:
+        content = f.read()
+
+    new_content = re.sub(
+        r"(<Note>\s*)<pos\b[^>]*(?:/>|>\s*</pos>)\s*",
+        r"\1",
+        content,
+    )
+
+    if new_content != content:
+        with open(mscx_file, "w", encoding="utf-8") as f:
+            f.write(new_content)
 
 
 def _create_musicxml_and_svg_files() -> None:
@@ -148,10 +342,16 @@ def _create_musicxml_and_svg_files() -> None:
 
     MuseScore = os.path.join(dataset_root, "MuseScore")
 
+    _ensure_music_font_style_files()
+
     all_jobs = []
 
     for file in mscx_files:
-        jobs = create_formats(str(file), ["musicxml", "svg"])
+        _make_tuplet_visible(str(file))
+        _make_staff_visible(str(file))
+        _reset_note_positions(str(file))
+        style_file = _music_font_style_file(_music_font_for_file(str(file)))
+        jobs = create_formats(str(file), ["musicxml", "svg"], style_file)
         all_jobs.extend(jobs)
 
     if len(all_jobs) == 0:
@@ -213,11 +413,11 @@ class MeasureCutter:
         self.voice = voice
         self.number_of_staffs = _count_staffs(voice)
         if self.number_of_staffs == 1:
-            self.clefs = [EncodedSymbol("clef_G2", empty, empty, empty, "upper")]
+            self.clefs = [EncodedSymbol("clef_G2", empty, empty, empty, empty, "upper")]
         else:
             self.clefs = [
-                EncodedSymbol("clef_G2", empty, empty, empty, "upper"),
-                EncodedSymbol("clef_F4", empty, empty, empty, "lower"),
+                EncodedSymbol("clef_G2", empty, empty, empty, empty, "upper"),
+                EncodedSymbol("clef_F4", empty, empty, empty, empty, "lower"),
             ]
         self.key = EncodedSymbol("keySignature_0")
         self.time = EncodedSymbol("timeSignature/4")
@@ -227,11 +427,18 @@ class MeasureCutter:
             return 1
         return 0
 
-    def extract_measures(self, count: int) -> list[EncodedSymbol]:
+    def extract_measures(
+        self, count: int, always_include_time: bool = False
+    ) -> list[EncodedSymbol]:
         clefs = self.clefs.copy()
         key = self.key
         time = self.time
-        has_time = False
+        # Lieder pages are crops of one continuously rendered score, so a courtesy time
+        # signature is only visible where the source XML actually redeclares it. pdmx and
+        # musetrainer windows are each re-rendered standalone (see generate_xml), and that
+        # renderer always draws a time signature on a fresh score - so those callers pass
+        # always_include_time=True to keep the label in sync with the image.
+        has_time = always_include_time
         result: list[EncodedSymbol] = []
         for i in range(count):
             selected_measure = self.voice.pop(0)
@@ -293,6 +500,7 @@ def _split_file_into_staffs(
 ) -> list[str]:
     result: list[str] = []
     png_file = svg_file.filename.replace(".svg", ".png")
+    image = None
     if not just_token_files:
         target_width = 1400
         scale = target_width / svg_file.width
@@ -331,7 +539,7 @@ def _split_file_into_staffs(
             width = int(width * scale)
             height = int(height * scale)
 
-            staff_image = image[y : y + height, x : x + width]
+            staff_image = image[y : y + height, x : x + width]  # type: ignore
             cv2.imwrite(staff_image_file_name, staff_image)
         elif not os.path.exists(staff_image_file_name) and fail_if_image_is_missing:
             raise ValueError(f"File {staff_image_file_name} not found")
@@ -355,34 +563,38 @@ def _split_file_into_staffs(
             )
         current_voice = (current_voice + 1) % number_of_voices
 
+    if image is not None:
+        del image
+
     return result
+
+
+def _leading_clefs(measure: Measure) -> list[EncodedSymbol]:
+    # The clefs of a measure always precede its notes/rests, but other preamble symbols
+    # (e.g. repeatStart on the very first measure) can come before them, so scan rather
+    # than assume fixed indices.
+    clefs = []
+    for symbol in measure:
+        if symbol.rhythm.startswith(("note", "rest")):
+            break
+        if symbol.rhythm.startswith("clef"):
+            clefs.append(symbol)
+    return clefs
 
 
 def _count_staffs(voice: list[Measure]) -> int:
     if len(voice) == 0:
         return 0
-    first_measure = voice[0]
-    if len(first_measure) == 0:
+    clefs = _leading_clefs(voice[0])
+    if len(clefs) == 0:
         return 0
-    if len(first_measure) < 3:
-        return 0
-    third_symbol = first_measure[2]
-    if third_symbol.rhythm.startswith("clef"):
-        return 2
-    return 1
+    return 2 if len(clefs) >= 2 else 1
 
 
 def is_grandstaff(voice: list[Measure]) -> bool:
     if len(voice) == 0:
         return False
-    first_measure = voice[0]
-    if len(first_measure) < 3:
-        return False
-    return (
-        first_measure[0].rhythm.startswith("clef")
-        and first_measure[1].rhythm == "chord"
-        and first_measure[2].rhythm.startswith("clef")
-    )
+    return len(_leading_clefs(voice[0])) >= 2
 
 
 def get_svg_voice_count(voice: list[Measure]) -> int:
@@ -412,25 +624,8 @@ def convert_xml_and_svg_file(
                 number_of_voices -= 1
 
         result: list[str] = []
-        if len(pages) != len(svg_files):
-            total_svg_measures = sum(svg.number_of_measures for svg in svg_files) / number_of_voices
-            total_xml_measures = sum(page.number_of_measures for page in pages)
-            if total_xml_measures == total_svg_measures:
-                # This happens if the layout required extra pages
-                pages = [
-                    MusicXmlPage([], svg.number_of_measures // number_of_voices)
-                    for svg in svg_files
-                ]
-            else:
-                eprint(
-                    file,
-                    "INFO: Number of pages in SVG files",
-                    len(svg_files),
-                    "does not match number of pages in XML",
-                    len(pages),
-                )
+        assert len(pages) == len(svg_files)  # noqa: S101
 
-                return []
         for i, page in enumerate(pages):
             svg_file = svg_files[i]
             number_of_measures_per_voice_svg = svg_file.number_of_measures / number_of_voices
@@ -520,7 +715,7 @@ def convert_lieder(only_recreate_token_files: bool = False) -> None:
     with open(lieder_train_index, "w") as f:
         file_number = 0
         skipped_files = 0
-        with multiprocessing.Pool() as p:
+        with multiprocessing.Pool(processes=8, maxtasksperchild=2) as p:
             for result in p.imap_unordered(
                 (
                     _convert_file_only_token

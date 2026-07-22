@@ -22,22 +22,29 @@ class TestTrainingVocabulary(unittest.TestCase):
             EncodedSymbol("chord"),
             EncodedSymbol("note_8", "E5", position="lower"),
             EncodedSymbol("chord"),
-            EncodedSymbol("note_16", "E4", articulation="tieStart_tenuto", position="upper"),
+            EncodedSymbol(
+                "note_16", "E4", articulation="tenuto", slur="slurStart", position="upper"
+            ),
             EncodedSymbol("chord"),
-            EncodedSymbol("note_32", "D4", articulation="tieStart_slurStop", position="upper"),
+            EncodedSymbol("note_32", "D4", slur="slurStart_slurStop", position="upper"),
         ]
         result = token_lines_to_str(chord)
         self.maxDiff = None
         expected = (
-            "note_16 E4 . slurStop_staccatissimo_tenuto_tieStart upper&note_32 D4 . _ upper"
-            "&note_8 C4 . _ upper&note_8 E5 . . lower"
+            "note_16 E4 . staccatissimo_tenuto slurStart_slurStop upper&note_32 D4 . _ _ upper"
+            "&note_8 C4 . _ _ upper&note_8 E5 . . . lower"
         )
         self.assertEqual(result, expected)
 
     def test_clef_anchor_coverage(self) -> None:
+        # Clefs that don't represent pitch by vertical staff position (e.g. tablature)
+        # have no meaningful diatonic anchor and are intentionally excluded from
+        # CLEF_ANCHORS. Any other new clef must be added to CLEF_ANCHORS.
+        non_pitched_clefs = {"clef_TAB5"}
+
         vocabulary = Vocabulary()
         clef_tokens = {token for token in vocabulary.rhythm if token.startswith("clef_")}
-        self.assertEqual(clef_tokens, set(CLEF_ANCHORS.keys()))
+        self.assertEqual(clef_tokens - non_pitched_clefs, set(CLEF_ANCHORS.keys()))
 
     def test_max_ledger_lines(self) -> None:
         tokens = [

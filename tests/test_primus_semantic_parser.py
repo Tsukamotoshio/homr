@@ -1,6 +1,8 @@
 import unittest
 
-from training.datasets.primus_semantic_parser import convert_primus_semantic_to_tokens
+from training.omr_datasets.primus_semantic_parser import (
+    convert_primus_semantic_to_tokens,
+)
 from training.transformer.training_vocabulary import (
     check_token_lines,
     token_lines_to_str,
@@ -14,25 +16,24 @@ class TestPrimusSemanticToTokens(unittest.TestCase):
         result = convert_primus_semantic_to_tokens(example)
         check_token_lines(result)
         as_string = token_lines_to_str(result)
-        expected = """clef_G2 _ _ _ upper
-keySignature_-1 . . . .
-timeSignature/8 . . . .
-note_4. F4 _ _ upper
-barline . . . .
-note_4. A5 _ _ upper
-barline . . . .
-note_8G A5 _ _ upper
-note_4. G5 _ _ upper
-barline . . . .
-note_8 B5 b _ upper
-note_8 A5 _ _ upper
-note_8 G5 _ _ upper
-barline . . . .
-note_4. F5 _ _ upper
-tieSlur . . . .
-barline . . . .
-note_4. F5 _ _ upper
-barline . . . .
-note_4. A4 _ _ upper
-barline . . . ."""
+        expected = """clef_G2 _ _ _ _ upper
+keySignature_-1 . . . . .
+timeSignature/8 . . . . .
+note_4. F4 _ _ _ upper
+barline . . . . .
+note_4. A5 _ _ _ upper
+barline . . . . .
+note_8G A5 _ _ _ upper
+note_4. G5 _ _ _ upper
+barline . . . . .
+note_8 B5 b _ _ upper
+note_8 A5 _ _ _ upper
+note_8 G5 _ _ _ upper
+barline . . . . .
+note_4. F5 _ _ slurStart upper
+barline . . . . .
+note_4. F5 _ _ slurStop upper
+barline . . . . .
+note_4. A4 _ _ _ upper
+barline . . . . ."""
         self.assertEqual(as_string, expected)

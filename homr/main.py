@@ -3,6 +3,7 @@ import glob
 import hashlib
 import os
 import sys
+import xml.etree.ElementTree as ET
 from concurrent.futures import Future
 from dataclasses import dataclass
 from enum import Enum
@@ -32,6 +33,7 @@ from homr.model import InputPredictions, MultiStaff
 from homr.music_xml_generator import XmlGeneratorArguments, generate_xml
 from homr.noise_filtering import filter_predictions
 from homr.note_detection import add_notes_to_staffs, combine_noteheads_with_stems
+from homr.onnx_providers import coreml_available, cuda_available, dml_available
 from homr.resize import resize_image
 from homr.segmentation.config import segnet_path_onnx, segnet_path_onnx_fp16
 from homr.segmentation.inference_segnet import extract
@@ -77,7 +79,7 @@ def get_predictions(
     preprocessed: NDArray,
     img_path: str,
     enable_cache: bool,
-    use_gpu_inference: bool,
+    segnet_use_gpu: bool,
     batch_size: int = 8,
 ) -> InputPredictions:
     result = extract(
@@ -85,7 +87,7 @@ def get_predictions(
         img_path,
         step_size=320,
         use_cache=enable_cache,
-        use_gpu_inference=use_gpu_inference,
+        use_gpu_inference=segnet_use_gpu,
         batch_size=batch_size,
     )
     original_image = cv2.resize(original, (result.staff.shape[1], result.staff.shape[0]))
@@ -106,7 +108,7 @@ def replace_extension(path: str, new_extension: str) -> str:
 
 
 def load_and_preprocess_predictions(
-    image_path: str, enable_debug: bool, enable_cache: bool, use_gpu_inference: bool,
+    image_path: str, enable_debug: bool, enable_cache: bool, segnet_use_gpu: bool,
     segnet_batch_size: int = 8,
 ) -> tuple[InputPredictions, Debug]:
     image = cv2.imread(image_path)
@@ -117,7 +119,7 @@ def load_and_preprocess_predictions(
     image = autocrop(image)
     image = resize_image(image)
     preprocessed = color_adjust.apply_clahe(image)
-    predictions = get_predictions(image, preprocessed, image_path, enable_cache, use_gpu_inference,
+    predictions = get_predictions(image, preprocessed, image_path, enable_cache, segnet_use_gpu,
                                    batch_size=segnet_batch_size)
     debug = Debug(predictions.original, image_path, enable_debug)
     debug.write_image("color_adjust", preprocessed)
@@ -162,7 +164,14 @@ class ProcessingConfig:
     write_staff_positions: bool
     read_staff_positions: bool
     selected_staff: int
-    use_gpu_inference: bool
+    # The transformer (encoder/decoder) only benefits from CUDA: its fp16 "GPU"
+    # models are slower than the fp32 ones when they end up on the CPU EP, and
+    # the CoreML EP cannot run the decoder. Segnet additionally supports CoreML.
+    transformer_use_gpu: bool
+    segnet_use_gpu: bool
+    # Opt-in (--coreml-encoder): run the encoder on the Apple GPU via CoreML.
+    # Only helps across many images (slow one-time MLProgram compile).
+    coreml_encoder: bool
     segnet_batch_size: int = 8  # SegNet 每批推理的 patch 数；弱机可降低以减少内存峰值
 
 
@@ -187,12 +196,18 @@ def process_image(
                 debug, image, staff_position_files, config.selected_staff
             )
             title = ""
+            # parse_staffs() expects a grayscale image (cv2.findContours requires it),
+            # matching what the normal detect_staffs_in_image() path hands it
+            # (predictions.preprocessed). Apply the same CLAHE preprocessing here so the
+            # two code paths feed the symbol-recognition encoder consistent input.
+            image = color_adjust.apply_clahe(image)
         else:
             multi_staffs, image, debug, title_future = detect_staffs_in_image(image_path, config)
         debug_cleanup = debug
 
         transformer_config = Config()
-        transformer_config.use_gpu_inference = config.use_gpu_inference
+        transformer_config.use_gpu_inference = config.transformer_use_gpu
+        transformer_config.use_coreml_encoder = config.coreml_encoder
 
         result_staffs = parse_staffs(
             debug,
@@ -202,12 +217,13 @@ def process_image(
             config=transformer_config,
         )
 
-        title = title_future.result(60)
+        if not config.read_staff_positions:
+            title = title_future.result(60)
         eprint("Found title:", title)
 
         eprint("Writing XML", result_staffs)
         xml = generate_xml(xml_generator_args, result_staffs, title)
-        xml.write(xml_file)
+        ET.ElementTree(xml).write(xml_file, encoding="unicode", xml_declaration=True)
         _xml_written = True  # file is now complete; keep it even if later cleanup throws
 
         eprint("Finished parsing " + str(len(result_staffs)) + " staves")
@@ -236,7 +252,7 @@ def detect_staffs_in_image(
     image_path: str, config: ProcessingConfig
 ) -> tuple[list[MultiStaff], NDArray, Debug, Future[str]]:
     predictions, debug = load_and_preprocess_predictions(
-        image_path, config.enable_debug, config.enable_cache, config.use_gpu_inference,
+        image_path, config.enable_debug, config.enable_cache, config.segnet_use_gpu,
         segnet_batch_size=config.segnet_batch_size,
     )
     symbols = predict_symbols(debug, predictions)
@@ -328,10 +344,10 @@ _WEIGHT_BASE_URLS = [
 _WEIGHT_FILES = [
     "segnet_308-3296ccd40960f90ca6ab9c035cca945675d30a0f.onnx",
     "segnet_308-3296ccd40960f90ca6ab9c035cca945675d30a0f_fp16.onnx",
-    "encoder_pytorch_model_367-575b4737bca815d3a7b37169269fc548d7e945b9.onnx",
-    "encoder_pytorch_model_367-575b4737bca815d3a7b37169269fc548d7e945b9_fp16.onnx",
-    "decoder_pytorch_model_367-575b4737bca815d3a7b37169269fc548d7e945b9.onnx",
-    "decoder_pytorch_model_367-575b4737bca815d3a7b37169269fc548d7e945b9_fp16.onnx",
+    "encoder_pytorch_model_426-b6fd20809a8dcaf10dfd39a4ca4f64c6f056e644.onnx",
+    "encoder_pytorch_model_426-b6fd20809a8dcaf10dfd39a4ca4f64c6f056e644_fp16.onnx",
+    "decoder_pytorch_model_426-b6fd20809a8dcaf10dfd39a4ca4f64c6f056e644.onnx",
+    "decoder_pytorch_model_426-b6fd20809a8dcaf10dfd39a4ca4f64c6f056e644_fp16.onnx",
 ]
 
 # SHA256 hash of each weight file (lowercase hex, no prefix).
@@ -344,14 +360,14 @@ _WEIGHT_HASHES: dict[str, str] = {
         '6ed36640db4ef5d223098b6d5efe4eda97c66b24a2c72faab8a018c749003a8d',
     'segnet_308-3296ccd40960f90ca6ab9c035cca945675d30a0f_fp16.onnx':
         '60f495496cb41473c0521d0811d8f44b9d5cff892d287974a8aebb3eaee2fa83',
-    'encoder_pytorch_model_367-575b4737bca815d3a7b37169269fc548d7e945b9.onnx':
-        '1427f5144d2617184515ba60b50be94a0119a10510a0ff8d58fe5fc4555599c2',
-    'encoder_pytorch_model_367-575b4737bca815d3a7b37169269fc548d7e945b9_fp16.onnx':
-        'aa252963c934234d30faca0a2363903f6ec02e81f85f87f12dadad7035ec6495',
-    'decoder_pytorch_model_367-575b4737bca815d3a7b37169269fc548d7e945b9.onnx':
-        '331cef4a41f39e97b57d506951fa17fb7ae3345eaa6334107c71c1f6203372bd',
-    'decoder_pytorch_model_367-575b4737bca815d3a7b37169269fc548d7e945b9_fp16.onnx':
-        '60c037e2eb30a142d746051e5c3aa0aa23445b3563c44673f95b8b1c5102a6aa',
+    'encoder_pytorch_model_426-b6fd20809a8dcaf10dfd39a4ca4f64c6f056e644.onnx':
+        '1513e83ae281ef06cdb8f08451b59f06c56536f13bd3418b4fd13227543dc4ff',
+    'encoder_pytorch_model_426-b6fd20809a8dcaf10dfd39a4ca4f64c6f056e644_fp16.onnx':
+        'cd2da3ddec91af046d274506947f01da079c4ec5908ba0dd4c0c5985f780c82a',
+    'decoder_pytorch_model_426-b6fd20809a8dcaf10dfd39a4ca4f64c6f056e644.onnx':
+        '8652b5c2e3129775ca9109eb180c16c3615413ce38005adc8ce5966c3c76737c',
+    'decoder_pytorch_model_426-b6fd20809a8dcaf10dfd39a4ca4f64c6f056e644_fp16.onnx':
+        '58d55eebe22788ce98f0fc7730480a79c9f56534db064e8d32b1d5fe2579904a',
 }
 # Sanity check: every file in _WEIGHT_FILES must have a hash entry.
 assert set(_WEIGHT_HASHES.keys()) == set(_WEIGHT_FILES), (  # noqa: S101
@@ -409,21 +425,22 @@ def _download_from_any_source(onnx_path: str, dest_model_path: str) -> None:
     raise last_err
 
 
-def download_weights(use_gpu_inference: bool) -> None:
-    if use_gpu_inference:
-        models = [
-            segnet_path_onnx_fp16,
-            default_config.filepaths.encoder_path_fp16,
-            default_config.filepaths.decoder_path_fp16,
-        ]
-        missing_models = [model for model in models if not os.path.exists(model)]
+def download_weights(segnet_use_gpu: bool, transformer_use_gpu: bool, coreml_encoder: bool) -> None:
+    models = [segnet_path_onnx_fp16 if segnet_use_gpu else segnet_path_onnx]
+    if transformer_use_gpu:
+        # CUDA/DML run the whole transformer on the fp16 models.
+        models.append(default_config.filepaths.encoder_path_fp16)
+        models.append(default_config.filepaths.decoder_path_fp16)
     else:
-        models = [
-            segnet_path_onnx,
-            default_config.filepaths.encoder_path,
-            default_config.filepaths.decoder_path,
-        ]
-        missing_models = [model for model in models if not os.path.exists(model)]
+        # On the CPU EP the fp32 models are faster, and the CoreML EP cannot run
+        # the decoder, so the decoder always uses fp32. The CoreML encoder, when
+        # enabled, uses the fp16 encoder instead of the fp32 one.
+        if coreml_encoder:
+            models.append(default_config.filepaths.encoder_path_fp16)
+        else:
+            models.append(default_config.filepaths.encoder_path)
+        models.append(default_config.filepaths.decoder_path)
+    missing_models = [model for model in models if not os.path.exists(model)]
 
     if len(missing_models) == 0:
         return
@@ -481,16 +498,31 @@ def main() -> None:
         default=GpuSupport.AUTO,
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--coreml-encoder",
+        action="store_true",
+        help="On Apple Silicon, run the transformer encoder on the GPU via "
+        + "CoreML. Compiling the model takes 26-60 s at startup, so this only "
+        + "pays off when processing many images. Has no effect with CUDA.",
+    )
 
     args = parser.parse_args()
 
-    has_gpu_support = "CUDAExecutionProvider" in ort.get_available_providers()
+    force_gpu = args.gpu == GpuSupport.FORCE
+    auto_gpu = args.gpu == GpuSupport.AUTO
 
-    use_gpu_inference = (
-        args.gpu == GpuSupport.AUTO and has_gpu_support
-    ) or args.gpu == GpuSupport.FORCE
+    # CUDA/DML speed up the whole pipeline. CoreML only helps segnet: the fp16
+    # models the GPU path uses are slower on the CPU EP than the fp32 ones,
+    # and the CoreML EP cannot run the decoder (see Segnet for details).
+    transformer_use_gpu = force_gpu or (auto_gpu and (cuda_available() or dml_available()))
+    segnet_use_gpu = force_gpu or (
+        auto_gpu and (cuda_available() or dml_available() or coreml_available())
+    )
+    # The CoreML encoder is a separate opt-in and only applies when the
+    # transformer isn't already on CUDA.
+    coreml_encoder = args.coreml_encoder and not transformer_use_gpu and coreml_available()
 
-    download_weights(use_gpu_inference)
+    download_weights(segnet_use_gpu, transformer_use_gpu, coreml_encoder)
     if args.init:
         download_ocr_weights()
         eprint("Init finished")
@@ -502,7 +534,9 @@ def main() -> None:
         args.write_staff_positions,
         args.read_staff_positions,
         -1,
-        use_gpu_inference,
+        transformer_use_gpu,
+        segnet_use_gpu,
+        coreml_encoder,
     )
 
     xml_generator_args = XmlGeneratorArguments(
