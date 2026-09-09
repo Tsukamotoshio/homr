@@ -39,7 +39,6 @@ from homr.onnx_providers import (
     dml_available,
     rocm_available,
 )
-from homr.pdf_utils import render_pdf_to_image
 from homr.relieur import process_concat
 from homr.resize import resize_image
 from homr.segmentation.config import segnet_path_onnx, segnet_path_onnx_fp16
@@ -330,6 +329,21 @@ def detect_staffs_in_image(
     return multi_staffs, predictions.preprocessed, debug, title_future, len(staffs)
 
 
+
+def _render_pdf_to_image(pdf_path: str) -> list[str]:
+    """Import homr.pdf_utils lazily so pypdfium2 is only required for PDF input.
+
+    SumisoraOMR fork note: this project deliberately dropped pypdfium2 on
+    2026-08-14 (PDF preview moved client-side to pdf.js) and rasterises PDF
+    pages itself with PyMuPDF in core/omr/homr_runner.py:_pdf_pages_to_png
+    before ever calling homr, so homr is never handed a .pdf path. A
+    module-level `from homr.pdf_utils import ...` would therefore make
+    `import homr.main` fail outright on an image-only install.
+    """
+    from homr.pdf_utils import render_pdf_to_image
+
+    return render_pdf_to_image(pdf_path)
+
 def get_all_image_files_in_folder(folder: str) -> list[str]:
     image_files = []
     for ext in ["png", "jpg", "jpeg", "pdf", "PNG", "JPG", "JPEG", "PDF"]:
@@ -609,7 +623,7 @@ def main() -> None:
         if os.path.isfile(image):
             # Multiple files are getting merged
             if image.lower().endswith(".pdf"):
-                images_to_combine += render_pdf_to_image(image)
+                images_to_combine += _render_pdf_to_image(image)
             else:
                 images_to_combine.append(image)
 
@@ -622,7 +636,7 @@ def main() -> None:
                 eprint("=========================================")
                 try:
                     if image_file.lower().endswith(".pdf"):
-                        rendered_images = render_pdf_to_image(image_file)
+                        rendered_images = _render_pdf_to_image(image_file)
                         run_homr(rendered_images, config, xml_generator_args)
                     else:
                         process_image(image_file, config, xml_generator_args)
