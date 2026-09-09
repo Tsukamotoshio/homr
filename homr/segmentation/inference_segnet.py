@@ -18,6 +18,7 @@ from homr.onnx_providers import (
     cuda_available,
     dml_available,
     gpu_providers,
+    rocm_available,
 )
 from homr.segmentation.config import (
     segmentation_version,
@@ -35,7 +36,7 @@ class Segnet:
         _sess_opts.log_severity_level = 3  # 仅显示 ERROR，抑制 WARNING/INFO（含 Conv Fallback 等）
         _sess_opts.intra_op_num_threads = _ORT_INTRA_THREADS  # 限制单算子并行线程
         _sess_opts.inter_op_num_threads = 1                   # 算子间串行执行
-        if use_gpu_inference and (cuda_available() or dml_available()):
+        if use_gpu_inference and (cuda_available() or rocm_available() or dml_available()):
             try:
                 # I had this issue: https://github.com/microsoft/onnxruntime/issues/21684
                 # If torch is installed, this fixes
@@ -160,6 +161,9 @@ class ExtractResult:
         self.clefs_keys = clefs_keys
 
 
+_segnet_inference: Segnet | None = None
+
+
 def extract_patch(image: NDArray, y: int, x: int, win_size: int) -> NDArray:
     """
     Returns a full-size (3, win_size, win_size) patch.
@@ -233,7 +237,9 @@ def inference(
     if step_size < 0:
         step_size = win_size // 2
 
-    model = Segnet(use_gpu_inference)
+    global _segnet_inference  # noqa: PLW0603
+    if _segnet_inference is None:
+        _segnet_inference = Segnet(use_gpu_inference)
 
     image_org = cv2.cvtColor(image_org, cv2.COLOR_GRAY2BGR)
     image = np.transpose(image_org, (2, 0, 1)).astype(np.float32)
@@ -252,13 +258,13 @@ def inference(
             batch.append(hop)
 
             if len(batch) == batch_size:
-                batch_out = model.run(np.stack(batch, axis=0))
+                batch_out = _segnet_inference.run(np.stack(batch, axis=0))
                 for out in batch_out:
                     data.append(np.argmax(out, axis=0))
                 batch.clear()
 
     if batch:
-        batch_out = model.run(np.stack(batch, axis=0))
+        batch_out = _segnet_inference.run(np.stack(batch, axis=0))
         for out in batch_out:
             data.append(np.argmax(out, axis=0))
 

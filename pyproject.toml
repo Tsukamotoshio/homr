@@ -14,14 +14,20 @@ dependencies = [
   "types-Pillow >= 10.2.0.20240822, < 11",
   "typing_extensions >= 4.15.0, < 5",
   "rapidocr >= 3.7.0, < 4",
-  "onnxruntime >= 1.24.1, < 2",
   "requests >= 2.32.5, < 3",
+  "pypdfium2 >= 4, < 6",
 ]
 dynamic = ["version"]
 
 [project.optional-dependencies]
-gpu = [
-  "onnxruntime-gpu >= 1.24.1, < 2",
+cpu = [
+  "onnxruntime >= 1.24.1, < 2",
+]
+cuda = [
+  "onnxruntime-gpu[cuda,cudnn] >= 1.24.1, < 2",
+]
+rocm = [
+  "onnxruntime-rocm @ https://repo.radeon.com/rocm/manylinux/rocm-rel-7.0/onnxruntime_rocm-1.22.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
 ]
 
 [dependency-groups]
@@ -155,7 +161,7 @@ strict_equality = true
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = "training.architecture.transformer.custom_x_transformer"
+module = ["training.architecture.transformer.custom_x_transformer", "homr.relieur"]
 ignore_errors = true
 
 [[tool.mypy.overrides]]

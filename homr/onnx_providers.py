@@ -1,6 +1,6 @@
 """GPU execution-provider selection for ONNX Runtime.
 
-homr was written for NVIDIA/CUDA only. This helper adds support for the
+homr was written for NVIDIA/AMD GPU only. This helper adds support for the
 Apple Silicon GPU / Neural Engine via the CoreML execution provider.
 
 On Macs only segnet (and, opt-in, the encoder) runs on CoreML: the CoreML EP
@@ -71,6 +71,10 @@ def cuda_available() -> bool:
     return "CUDAExecutionProvider" in ort.get_available_providers()
 
 
+def rocm_available() -> bool:
+    return "ROCMExecutionProvider" in ort.get_available_providers()
+
+
 def coreml_available() -> bool:
     return "CoreMLExecutionProvider" in ort.get_available_providers()
 
@@ -81,8 +85,8 @@ def dml_available() -> bool:
 
 
 def gpu_available() -> bool:
-    """True if any GPU execution provider (CUDA, DirectML or Apple CoreML) is present."""
-    return cuda_available() or dml_available() or coreml_available()
+    """True if any GPU execution provider (CUDA, ROCm, DirectML or CoreML) is present."""
+    return cuda_available() or rocm_available() or dml_available() or coreml_available()
 
 
 def gpu_providers(cuda_options: dict[str, Any] | None = None) -> tuple[list[Any], str]:
@@ -96,11 +100,20 @@ def gpu_providers(cuda_options: dict[str, Any] | None = None) -> tuple[list[Any]
         if cuda_options:
             return [("CUDAExecutionProvider", cuda_options)], "cuda"
         return ["CUDAExecutionProvider"], "cuda"
+    if "ROCMExecutionProvider" in available:
+        # Do not enable *tunable_op_tuning_enable*:
+        # the decoder's KV cache grows every token, so each step is a new shape,
+        # making it hard to tune the kernels.
+        options = {"tunable_op_enable": "1", "tunable_op_tuning_enable": "0"}
+        return [("ROCMExecutionProvider", options)], "cuda"
+        # "cuda" here may be confusing, but ORT only accepts "cuda"/"cpu"/"dml".
+        # ROCm still uses that CUDA device string for HIP device memory.
     # DirectML (Windows): compute runs on the GPU, but ORT exposes no "dml"
     # device memory to io_binding, so inputs/outputs stay bound on the CPU —
-    # same contract as CoreML below.
+    # same contract as CoreML below. Note this differs from the ROCm branch
+    # above, which does return the "cuda" device string.
     if "DmlExecutionProvider" in available:
         return ["DmlExecutionProvider"], "cpu"
     if "CoreMLExecutionProvider" in available:
         return [("CoreMLExecutionProvider", _coreml_options())], "cpu"
-    raise RuntimeError("No GPU execution provider (CUDA, DirectML or CoreML) is available")
+    raise RuntimeError("No GPU execution provider (CUDA, ROCm, DirectML or CoreML) is available")

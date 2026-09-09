@@ -33,8 +33,20 @@ class Encoder:
                     providers=providers,
                 )
                 self.fp16 = True
-                # CoreML/DML bind IO on the CPU even though compute runs on the GPU/ANE.
-                self.use_gpu = device == "cuda"
+                # CoreML and DirectML bind IO on the CPU even though compute runs on
+                # the GPU/ANE; for both, gpu_providers() returns device "cpu", so the
+                # branch below leaves self.use_gpu False.
+                active = self.encoder.get_providers()
+                if device == "cuda":
+                    for active_provider in active:
+                        if active_provider in {"CUDAExecutionProvider", "ROCMExecutionProvider"}:
+                            self.use_gpu = True
+                            break
+                    if not self.use_gpu:
+                        eprint(
+                            "Onnxruntime is not using GPU and therefore falling back to CPU. "
+                            "This is slow."
+                        )
 
             except Exception as ex:
                 eprint(ex)

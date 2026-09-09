@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 from homr.music_xml_generator import (
     SymbolChord,
     XmlGeneratorArguments,
+    convert_ties,
     generate_xml,
     rebalance_measure_voices,
 )
@@ -42,6 +43,18 @@ def _staff(note: ET.Element) -> str:
 
 def _backups(measure: ET.Element) -> list[int]:
     return [int(c.findtext("duration", "0")) for c in measure if c.tag == "backup"]
+
+
+def _ties(xml: ET.Element) -> list[str]:
+    return [t.get("type", "") for t in xml.iter("tie")]
+
+
+def _tieds(xml: ET.Element) -> list[str]:
+    return [t.get("type", "") for t in xml.iter("tied")]
+
+
+def _slurs(xml: ET.Element) -> list[str]:
+    return [s.get("type", "") for s in xml.iter("slur")]
 
 
 def _first_measure(xml: ET.Element) -> ET.Element:
@@ -205,3 +218,181 @@ barline . . . . ."""
         v = note.findtext("voice")
         self.assertIsNotNone(v)
         return str(v)
+
+    def test_slur_between_same_pitches_becomes_a_tie(self) -> None:
+        """A slur joining two identical pitches is a tie, and needs both elements."""
+        tied = """clef_G2 . . . . upper
+timeSignature/4 . . . . .
+note_4 C4 _ _ slurStart upper
+note_4 C4 _ _ slurStop upper
+note_2 D4 _ _ _ upper
+barline . . . . ."""
+        tokens = read_token_lines(tied.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+
+        # <tie> is what sounds, <tied> is what is drawn: both are required, or
+        # the notes are drawn joined and still played separately.
+        self.assertEqual(_ties(xml), ["start", "stop"])
+        self.assertEqual(_tieds(xml), ["start", "stop"])
+        # the slur it came from is gone
+        self.assertEqual(_slurs(xml), [])
+
+    def test_tie_between_two_chords(self) -> None:
+        """Every notehead of a chord ties to its own pitch in the next one."""
+        chords = """clef_G2 . . . . upper
+timeSignature/4 . . . . .
+note_4 C4 _ _ slurStart upper&note_4 E4 _ _ slurStart upper
+note_4 C4 _ _ slurStop upper&note_4 E4 _ _ slurStop upper
+barline . . . . ."""
+        tokens = read_token_lines(chords.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+
+        self.assertEqual(sorted(_ties(xml)), ["start", "start", "stop", "stop"])
+        self.assertEqual(_slurs(xml), [])
+
+    def test_tie_on_one_notehead_of_a_chord(self) -> None:
+        """The model marks the notehead the curve touches, not the whole chord.
+
+        On real output almost every slurred chord carries the slur on some of
+        its members only, so a tie has to be found for that pitch alone and
+        leave the rest of the chord as it is.
+        """
+        chords = """clef_G2 . . . . upper
+timeSignature/4 . . . . .
+note_4 C4 _ _ _ upper&note_4 E4 _ _ slurStart upper
+note_4 C4 _ _ _ upper&note_4 E4 _ _ slurStop upper
+barline . . . . ."""
+        tokens = read_token_lines(chords.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+
+        self.assertEqual(_ties(xml), ["start", "stop"])
+        self.assertEqual(_slurs(xml), [])
+        tied = [n for n in xml.iter("note") if n.find("tie") is not None]
+        self.assertEqual([_pitch(n) for n in tied], ["E", "E"])
+
+    def test_slur_from_a_chord_to_a_different_pitch_stays_a_slur(self) -> None:
+        chords = """clef_G2 . . . . upper
+timeSignature/4 . . . . .
+note_4 C4 _ _ _ upper&note_4 E4 _ _ slurStart upper
+note_4 C4 _ _ _ upper&note_4 G4 _ _ slurStop upper
+barline . . . . ."""
+        tokens = read_token_lines(chords.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+
+        self.assertEqual(_slurs(xml), ["start", "stop"])
+        self.assertEqual(_ties(xml), [])
+
+    def test_phrase_slur_over_three_events_stays_a_slur(self) -> None:
+        """Adjacency is what separates a tie from a phrase mark.
+
+        A curve that leaves a pitch and comes back to it later is a phrase,
+        however identical its two ends are, so only the immediately following
+        event may close a tie.
+        """
+        phrase = """clef_G2 . . . . upper
+timeSignature/4 . . . . .
+note_4 C4 _ _ _ upper&note_4 G4 _ _ slurStart upper
+note_4 A4 _ _ _ upper
+note_4 C4 _ _ _ upper&note_4 G4 _ _ slurStop upper
+barline . . . . ."""
+        tokens = read_token_lines(phrase.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+
+        self.assertEqual(_slurs(xml), ["start", "stop"])
+        self.assertEqual(_ties(xml), [])
+
+    def test_shared_pitch_without_a_slur_of_its_own_stays_untied(self) -> None:
+        """A pitch in both chords is not enough; the curve has to be on it.
+
+        Here C4 is in both chords and the curve runs from G4 to C4, so nothing
+        ties: G4 has no stop to reach, and C4 has no start behind it.
+        """
+        crossing = """clef_G2 . . . . upper
+timeSignature/4 . . . . .
+note_4 C4 _ _ _ upper&note_4 G4 _ _ slurStart upper
+note_4 C4 _ _ slurStop upper&note_4 A4 _ _ _ upper
+barline . . . . ."""
+        tokens = read_token_lines(crossing.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+
+        self.assertEqual(_slurs(xml), ["start", "stop"])
+        self.assertEqual(_ties(xml), [])
+
+    def test_slur_between_different_pitches_stays_a_slur(self) -> None:
+        phrase = """clef_G2 . . . . upper
+timeSignature/4 . . . . .
+note_4 C4 _ _ slurStart upper
+note_4 E4 _ _ slurStop upper
+note_2 D4 _ _ _ upper
+barline . . . . ."""
+        tokens = read_token_lines(phrase.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+
+        self.assertEqual(_slurs(xml), ["start", "stop"])
+        self.assertEqual(_ties(xml), [])
+
+    def test_tie_is_recognised_across_a_barline(self) -> None:
+        """Ties cross barlines constantly, which is why the pass runs per part."""
+        across = """clef_G2 . . . . upper
+timeSignature/4 . . . . .
+note_1 C4 _ _ slurStart upper
+barline . . . . .
+note_1 C4 _ _ slurStop upper
+barline . . . . ."""
+        tokens = read_token_lines(across.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+
+        self.assertEqual(_ties(xml), ["start", "stop"])
+        self.assertEqual(_slurs(xml), [])
+
+    def test_same_pitch_but_not_adjacent_stays_a_slur(self) -> None:
+        """Same pitch is not enough: a tie joins a note to its immediate successor."""
+        apart = """clef_G2 . . . . upper
+timeSignature/4 . . . . .
+note_4 C4 _ _ slurStart upper
+note_4 E4 _ _ _ upper
+note_4 C4 _ _ slurStop upper
+note_4 D4 _ _ _ upper
+barline . . . . ."""
+        tokens = read_token_lines(apart.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+
+        self.assertEqual(_ties(xml), [])
+        self.assertEqual(_slurs(xml), ["start", "stop"])
+
+    def test_convert_ties_leaves_a_part_without_slurs_alone(self) -> None:
+        part = ET.Element("part", id="P1")
+        measure = ET.SubElement(part, "measure", number="1")
+        note = ET.SubElement(measure, "note")
+        pitch = ET.SubElement(note, "pitch")
+        ET.SubElement(pitch, "step").text = "C"
+        ET.SubElement(pitch, "octave").text = "4"
+        ET.SubElement(note, "duration").text = "4"
+        ET.SubElement(note, "voice").text = "1"
+        ET.SubElement(note, "staff").text = "1"
+
+        convert_ties(part)
+        self.assertEqual(_ties(part), [])
+
+    def test_tie_found_while_another_slur_is_open_on_the_same_staff(self) -> None:
+        """Several slurs share a staff, and so share a slur number.
+
+        The tie here opens and closes inside a longer slur. Nothing can tell
+        the two apart by number, which is why ties are detected from a note
+        and its successor rather than by pairing starts with stops.
+        """
+        nested = """clef_G2 . . . . upper
+timeSignature/4 . . . . .
+note_4 E4 _ _ slurStart upper
+note_4 C4 _ _ slurStart upper
+note_4 C4 _ _ slurStop upper
+note_4 G4 _ _ slurStop upper
+barline . . . . ."""
+        tokens = read_token_lines(nested.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+
+        # the inner pair became a tie
+        self.assertEqual(_ties(xml), ["start", "stop"])
+        self.assertEqual(_tieds(xml), ["start", "stop"])
+        # the outer slur is untouched
+        self.assertEqual(_slurs(xml), ["start", "stop"])

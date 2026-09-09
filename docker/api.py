@@ -1,25 +1,3 @@
-# Run e.g. with docker build -t homr . && docker run --rm -p 8080:8000 homr
-# And then send images: curl -X POST -F "file=@tabi.jpg" http://localhost:8080/process --output tabi.musicxml
-
-FROM python:3.11
-
-WORKDIR /app
-
-RUN apt update && apt install -y libgl1
-
-RUN curl -sSL https://install.python-poetry.org | python3 -
-
-RUN git clone https://github.com/liebharc/homr .
-
-RUN /root/.local/bin/poetry install --without dev
-
-RUN /root/.local/bin/poetry run pip install --no-cache-dir fastapi uvicorn python-multipart
-
-# Pre-download models
-RUN /root/.local/bin/poetry run python homr/main.py --init
-
-# Generate FastAPI app inline
-RUN cat <<'EOF' > api.py
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks
 from fastapi.responses import FileResponse
 import subprocess
@@ -54,9 +32,3 @@ def process_image(
         media_type="application/xml",
         filename=os.path.basename(output_path),
     )
-EOF
-
-EXPOSE 8000
-
-CMD ["/root/.local/bin/poetry", "run", "uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
-

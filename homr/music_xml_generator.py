@@ -1,3 +1,5 @@
+# flake8: noqa: S101
+
 import math
 import xml.etree.ElementTree as ET
 from collections import defaultdict
@@ -135,6 +137,7 @@ def build_part(
     is_first_part = index == 0
     for measure in build_measures(args, voice, is_first_part, has_two_staves):
         part.append(measure)
+    convert_ties(part)
     return part
 
 
@@ -408,6 +411,112 @@ def rebalance_measure_voices(measure: ET.Element) -> None:
                     voice_el.text = xml_voice
 
 
+def get_note_pitch(note: ET.Element) -> str | None:
+    pitch = note.find("pitch")
+    if pitch is None:
+        return None
+    return "|".join(pitch.findtext(part, "") for part in ("step", "alter", "octave"))
+
+
+def get_slur(note: ET.Element, slur_type: str) -> tuple[ET.Element, ET.Element] | None:
+    """The note's slur of this type with the notations holding it, if any.
+
+    build_slurs writes at most one start and one stop per note, so there is
+    never a choice to make here.
+    """
+    for notation in note.findall("notations"):
+        for slur in notation.findall("slur"):
+            if slur.get("type") == slur_type:
+                return slur, notation
+    return None
+
+
+def add_tie(note: ET.Element, tie_type: str, notation: ET.Element) -> None:
+    """A tie needs both elements: <tie> for what sounds, <tied> for what is drawn."""
+    tie = ET.Element("tie", type=tie_type)
+    duration = note.find("duration")
+    position = list(note).index(duration) + 1 if duration is not None else 0
+    note.insert(position, tie)
+    notation.insert(0, ET.Element("tied", type=tie_type))
+
+
+def convert_ties(part: ET.Element) -> None:
+    """Rewrite slurs which are really ties, over a whole part.
+
+    The model learns slurs and ties as one class on purpose, so a tie reaches
+    us as a slur. A slur is a tie when it joins a note to the very next note
+    of its own voice and both carry the same pitch.
+
+    Deliberately no attempt to pair slur starts with slur stops. The slur
+    number is the staff number, so several slurs open on one staff share a
+    number and cannot be told apart by it — four at once on a test file — and
+    any pairing rule would be guessing. A tie needs no pairing: it is a
+    property of a note and its immediate successor.
+
+    Run per part rather than per measure, because ties cross barlines. One
+    pass is enough: the last event seen in a voice is by definition the
+    predecessor of the next one in it.
+    """
+    previous: dict[tuple[str, str], list[ET.Element]] = {}
+    for measure in part.findall("measure"):
+        for event in group_into_events(measure):
+            first = event[0]
+            key = (first.findtext("staff", "1"), first.findtext("voice", "1"))
+            before = previous.get(key)
+            previous[key] = event
+            if before is None:
+                continue
+            tie_event(before, event)
+
+
+def group_into_events(measure: ET.Element) -> list[list[ET.Element]]:
+    """The measure's notes, with each chord kept together as one event.
+
+    A chord is one moment of the music, not several: <chord> means "sounds
+    with the note before". Walking notes one at a time makes a chord's own
+    members each other's neighbours, so nothing in a chord ever finds the note
+    it is really adjacent to, and no tie between two chords is ever seen.
+    """
+    events: list[list[ET.Element]] = []
+    for note in measure.findall("note"):
+        if note.find("chord") is not None and events:
+            events[-1].append(note)
+        else:
+            events.append([note])
+    return events
+
+
+def tie_event(before: list[ET.Element], after: list[ET.Element]) -> None:
+    """Convert every slur between two adjacent events that is really a tie.
+
+    Matched by pitch, and led by the slurs: the model marks the notehead the
+    curve touches, which on a chord is one member and not the whole thing -
+    of the chords carrying a slur on my test material, 25 of 26 had it on
+    some members only. So each slurred note looks for its own pitch in the
+    next event rather than the chord being taken as a whole.
+    """
+    for start_note in before:
+        begins = get_slur(start_note, "start")
+        if begins is None:
+            continue
+        pitch = get_note_pitch(start_note)
+        if pitch is None:
+            continue
+        for stop_note in after:
+            if get_note_pitch(stop_note) != pitch:
+                continue
+            ends = get_slur(stop_note, "stop")
+            if ends is None:
+                continue
+            begin_slur, begin_notation = begins
+            end_slur, end_notation = ends
+            begin_notation.remove(begin_slur)
+            end_notation.remove(end_slur)
+            add_tie(start_note, "start", begin_notation)
+            add_tie(stop_note, "stop", end_notation)
+            break
+
+
 def build_clef(model_clef: EncodedSymbol, attributes: ET.Element) -> None:
     sign_and_line = model_clef.rhythm.split("_")[1]
     clef = ET.SubElement(attributes, "clef", number=str(get_staff(model_clef)))
@@ -628,33 +737,42 @@ def build_multi_measure_rest(symbol: EncodedSymbol, attributes: ET.Element) -> N
     ET.SubElement(style, "multiple-rest").text = str(duration)
 
 
+def build_backup(duration: Fraction, state: ConversionState) -> ET.Element:
+    assert duration > Fraction(0), "Backup duration must be positive"
+    backup = ET.Element("backup")
+    ET.SubElement(backup, "duration").text = str(int(duration * state.division))
+    return backup
+
+
 def build_note_chord(
     note_chord: SymbolChord, state: ConversionState, chord_duration: Fraction
 ) -> list[ET.Element]:
     by_duration = _group_notes(note_chord.symbols)
     result: list[ET.Element] = []
-    final_duration = Fraction(0)
-    sorted_durations = sorted(by_duration)
-    for i, group_duration in enumerate(sorted_durations):
+    for i, (group_duration, group_notes) in enumerate(by_duration.items()):
+        notes = [n for n in group_notes if n.pitch not in (empty, nonote)]
+        rests = [n for n in group_notes if n.pitch in (empty, nonote)]
+
         is_first = True
-        for note_loop in by_duration[group_duration]:
-            result.append(
-                build_note_or_rest(note_loop, i, not is_first, state, note_chord.tuplet_mark)
-            )
+        for note in notes:
+            result.append(build_note_or_rest(note, i, not is_first, state, note_chord.tuplet_mark))
             is_first = False
-        if i != len(sorted_durations) - 1 and group_duration > Fraction(0):
-            backup = ET.Element("backup")
-            ET.SubElement(backup, "duration").text = str(int(group_duration * state.division))
-            result.append(backup)
 
-        final_duration = group_duration
+        if rests:
+            assert group_duration > Fraction(0)
+            if notes:
+                # There are other notes, so to avoid rest being merged into chord, we emit a backup
+                result.append(build_backup(group_duration, state))
+            # Ideally we expect len(rests) == 1, but in dataset we see cases where
+            # there are multiple rests. So here we just take the first rest
+            result.append(build_note_or_rest(rests[0], i, False, state, note_chord.tuplet_mark))
 
-    if chord_duration < final_duration:
-        backup = ET.Element("backup")
-        ET.SubElement(backup, "duration").text = str(
-            int((final_duration - chord_duration) * state.division)
-        )
-        result.append(backup)
+        if i != len(by_duration) - 1 and group_duration > Fraction(0):
+            result.append(build_backup(group_duration, state))
+
+    if chord_duration < max(by_duration):
+        result.append(build_backup(max(by_duration) - chord_duration, state))
+
     return result
 
 
@@ -671,7 +789,7 @@ def _group_notes(notes: list[EncodedSymbol]) -> dict[Fraction, list[EncodedSymbo
         else:
             fraction = duration.fraction
         groups_by_duration[fraction].append(note)
-    return groups_by_duration
+    return dict(sorted(groups_by_duration.items()))
 
 
 def build_add_time_direction(args: XmlGeneratorArguments) -> ET.Element | None:
