@@ -65,6 +65,25 @@ def _first_measure(xml: ET.Element) -> ET.Element:
     return m
 
 
+
+# <note>'s child order is fixed by the MusicXML DTD; this is the subset homr emits.
+_NOTE_CHILD_ORDER = [
+    "grace", "chord", "pitch", "rest", "unpitched", "duration", "tie", "instrument",
+    "footnote", "level", "voice", "type", "dot", "accidental", "time-modification",
+    "stem", "notehead", "staff", "beam", "notations", "lyric",
+]
+
+
+def _out_of_order_notes(xml: ET.Element) -> list[list[str]]:
+    bad = []
+    for note in xml.iter("note"):
+        tags = [c.tag for c in note if c.tag in _NOTE_CHILD_ORDER]
+        ranks = [_NOTE_CHILD_ORDER.index(t) for t in tags]
+        if ranks != sorted(ranks):
+            bad.append(tags)
+    return bad
+
+
 class TestMusicXmlGenerator(unittest.TestCase):
     """
     MusicXML testing is mostly covered by training/validate_music_xml_conversion.py
@@ -396,3 +415,24 @@ barline . . . . ."""
         self.assertEqual(_tieds(xml), ["start", "stop"])
         # the outer slur is untouched
         self.assertEqual(_slurs(xml), ["start", "stop"])
+
+    def test_note_children_are_emitted_in_dtd_order(self) -> None:
+        """<voice> belongs between <duration> and <type>, not after <time-modification>.
+
+        Emitting it late produced documents a validator rejects. It went unnoticed
+        because music21 tolerates the order and renormalises it when it
+        re-serialises, so only scores written straight out of homr kept it.
+        """
+        chords_dots_and_tuplets = """clef_G2 . . . . upper
+keySignature_4 . . . . .
+timeSignature/8 . . . . .
+note_4. G3 # _ _ upper &note_4. C4 # _ _ upper&note_16 E4 # _ _ upper
+note_16 F4 # _ _ upper
+note_12 E4 # _ _ upper
+note_12 C4 # _ _ upper
+note_12 D4 # _ _ upper
+rest_4 . . . . upper
+barline . . . . ."""
+        tokens = read_token_lines(chords_dots_and_tuplets.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+        self.assertEqual([], _out_of_order_notes(xml))

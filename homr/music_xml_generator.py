@@ -698,15 +698,28 @@ def build_note_or_rest(
         elif model_note.lift != empty:
             ET.SubElement(pitch, "alter").text = str(LIFT_TO_ALTER[model_note.lift])
 
+    staff_num = get_staff(model_note)
+    slur_number = staff_num
+
+    # <note>'s child order is fixed by the MusicXML DTD:
+    #   ..., duration, tie*, instrument*, footnote?, level?, voice?, type?, dot*,
+    #   accidental?, time-modification?, stem?, notehead?, ..., staff?, beam*, notations*
+    # <voice> therefore belongs between <duration> and <type>, not after
+    # <time-modification>. Emitting it late produced documents a validator rejects;
+    # music21 tolerates the order and silently renormalises it on re-serialisation,
+    # which is why it went unnoticed — scores written straight out of homr kept it.
     if "G" in model_note.rhythm:
         base_duration = model_duration.kern
+        ET.SubElement(note, "voice").text = str(get_xml_voice(staff_num, rhythmic_layer))
         ET.SubElement(note, "type").text = DURATION_NAMES[base_duration]
     elif model_duration.fraction.numerator > 0:
         base_duration = 1 if model_duration.kern == 0 else model_duration.kern
         ET.SubElement(note, "duration").text = str(int(model_duration.fraction * state.division))
+        ET.SubElement(note, "voice").text = str(get_xml_voice(staff_num, rhythmic_layer))
         ET.SubElement(note, "type").text = DURATION_NAMES[base_duration]
     else:
         ET.SubElement(note, "duration").text = str(state.beats)
+        ET.SubElement(note, "voice").text = str(get_xml_voice(staff_num, rhythmic_layer))
         ET.SubElement(note, "type").text = DURATION_NAMES[0]
 
     for _ in range(model_duration.dots):
@@ -717,9 +730,6 @@ def build_note_or_rest(
         ET.SubElement(time_mod, "actual-notes").text = str(model_duration.actual_notes)
         ET.SubElement(time_mod, "normal-notes").text = str(model_duration.normal_notes)
 
-    staff_num = get_staff(model_note)
-    slur_number = staff_num
-    ET.SubElement(note, "voice").text = str(get_xml_voice(staff_num, rhythmic_layer))
     ET.SubElement(note, "staff").text = str(staff_num)
 
     build_articulations(note, model_note.articulation, tuplet_mark, state)
