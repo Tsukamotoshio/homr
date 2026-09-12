@@ -23,7 +23,7 @@ class Encoder:
         _sess_opts = ort.SessionOptions()
         _sess_opts.log_severity_level = 3  # 仅显示 ERROR，抑制 WARNING/INFO（含 Conv Fallback 等）
         _sess_opts.intra_op_num_threads = _ORT_INTRA_THREADS  # 限制单算子并行线程
-        _sess_opts.inter_op_num_threads = 1                   # 算子间串行执行
+        _sess_opts.inter_op_num_threads = 1  # 算子间串行执行
         if config.use_gpu_inference:
             try:
                 providers, device = gpu_providers({"cudnn_conv_algo_search": "DEFAULT"})
@@ -95,14 +95,14 @@ class Encoder:
     def __del__(self) -> None:
         # 确保 io_binding 在 encoder session 之前释放，防止 use-after-free 崩溃
         try:
-            if hasattr(self, 'io_binding'):
+            if hasattr(self, "io_binding"):
                 del self.io_binding
-        except Exception:
+        except Exception:  # noqa: S110 — __del__ must not raise; there is nothing to recover
             pass
         try:
-            if hasattr(self, 'encoder'):
+            if hasattr(self, "encoder"):
                 del self.encoder
-        except Exception:
+        except Exception:  # noqa: S110 — __del__ must not raise; there is nothing to recover
             pass
 
     def generate(self, x: NDArray) -> NDArray:

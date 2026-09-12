@@ -114,7 +114,10 @@ def replace_extension(path: str, new_extension: str) -> str:
 
 
 def load_and_preprocess_predictions(
-    image_path: str, enable_debug: bool, enable_cache: bool, segnet_use_gpu: bool,
+    image_path: str,
+    enable_debug: bool,
+    enable_cache: bool,
+    segnet_use_gpu: bool,
     segnet_batch_size: int = 8,
 ) -> tuple[InputPredictions, Debug]:
     image = cv2.imread(image_path)
@@ -125,8 +128,9 @@ def load_and_preprocess_predictions(
     image = autocrop(image)
     image = resize_image(image)
     preprocessed = color_adjust.apply_clahe(image)
-    predictions = get_predictions(image, preprocessed, image_path, enable_cache, segnet_use_gpu,
-                                   batch_size=segnet_batch_size)
+    predictions = get_predictions(
+        image, preprocessed, image_path, enable_cache, segnet_use_gpu, batch_size=segnet_batch_size
+    )
     debug = Debug(predictions.original, image_path, enable_debug)
     debug.write_image("color_adjust", preprocessed)
 
@@ -260,7 +264,10 @@ def detect_staffs_in_image(
     image_path: str, config: ProcessingConfig
 ) -> tuple[list[MultiStaff], NDArray, Debug, Future[str], int]:
     predictions, debug = load_and_preprocess_predictions(
-        image_path, config.enable_debug, config.enable_cache, config.segnet_use_gpu,
+        image_path,
+        config.enable_debug,
+        config.enable_cache,
+        config.segnet_use_gpu,
         segnet_batch_size=config.segnet_batch_size,
     )
     symbols = predict_symbols(debug, predictions)
@@ -329,7 +336,6 @@ def detect_staffs_in_image(
     return multi_staffs, predictions.preprocessed, debug, title_future, len(staffs)
 
 
-
 def _render_pdf_to_image(pdf_path: str) -> list[str]:
     """Import homr.pdf_utils lazily so pypdfium2 is only required for PDF input.
 
@@ -340,9 +346,12 @@ def _render_pdf_to_image(pdf_path: str) -> list[str]:
     module-level `from homr.pdf_utils import ...` would therefore make
     `import homr.main` fail outright on an image-only install.
     """
-    from homr.pdf_utils import render_pdf_to_image
+    from homr.pdf_utils import (  # noqa: PLC0415 — deferred on purpose
+        render_pdf_to_image,
+    )
 
     return render_pdf_to_image(pdf_path)
+
 
 def get_all_image_files_in_folder(folder: str) -> list[str]:
     image_files = []
@@ -384,23 +393,33 @@ _WEIGHT_FILES = [
 # uploaded with different bytes, regenerate these hashes from one mirror and
 # verify the other matches before shipping.
 _WEIGHT_HASHES: dict[str, str] = {
-    'segnet_308-3296ccd40960f90ca6ab9c035cca945675d30a0f.onnx':
-        '6ed36640db4ef5d223098b6d5efe4eda97c66b24a2c72faab8a018c749003a8d',
-    'segnet_308-3296ccd40960f90ca6ab9c035cca945675d30a0f_fp16.onnx':
-        '60f495496cb41473c0521d0811d8f44b9d5cff892d287974a8aebb3eaee2fa83',
-    'encoder_pytorch_model_426-b6fd20809a8dcaf10dfd39a4ca4f64c6f056e644.onnx':
-        '1513e83ae281ef06cdb8f08451b59f06c56536f13bd3418b4fd13227543dc4ff',
-    'encoder_pytorch_model_426-b6fd20809a8dcaf10dfd39a4ca4f64c6f056e644_fp16.onnx':
-        'cd2da3ddec91af046d274506947f01da079c4ec5908ba0dd4c0c5985f780c82a',
-    'decoder_pytorch_model_426-b6fd20809a8dcaf10dfd39a4ca4f64c6f056e644.onnx':
-        '8652b5c2e3129775ca9109eb180c16c3615413ce38005adc8ce5966c3c76737c',
-    'decoder_pytorch_model_426-b6fd20809a8dcaf10dfd39a4ca4f64c6f056e644_fp16.onnx':
-        '58d55eebe22788ce98f0fc7730480a79c9f56534db064e8d32b1d5fe2579904a',
+    "segnet_308-3296ccd40960f90ca6ab9c035cca945675d30a0f.onnx": (
+        "6ed36640db4ef5d223098b6d5efe4eda97c66b24a2c72faab8a018c749003a8d"
+    ),
+    "segnet_308-3296ccd40960f90ca6ab9c035cca945675d30a0f_fp16.onnx": (
+        "60f495496cb41473c0521d0811d8f44b9d5cff892d287974a8aebb3eaee2fa83"
+    ),
+    "encoder_pytorch_model_426-b6fd20809a8dcaf10dfd39a4ca4f64c6f056e644.onnx": (
+        "1513e83ae281ef06cdb8f08451b59f06c56536f13bd3418b4fd13227543dc4ff"
+    ),
+    "encoder_pytorch_model_426-b6fd20809a8dcaf10dfd39a4ca4f64c6f056e644_fp16.onnx": (
+        "cd2da3ddec91af046d274506947f01da079c4ec5908ba0dd4c0c5985f780c82a"
+    ),
+    "decoder_pytorch_model_426-b6fd20809a8dcaf10dfd39a4ca4f64c6f056e644.onnx": (
+        "8652b5c2e3129775ca9109eb180c16c3615413ce38005adc8ce5966c3c76737c"
+    ),
+    "decoder_pytorch_model_426-b6fd20809a8dcaf10dfd39a4ca4f64c6f056e644_fp16.onnx": (
+        "58d55eebe22788ce98f0fc7730480a79c9f56534db064e8d32b1d5fe2579904a"
+    ),
 }
-# Sanity check: every file in _WEIGHT_FILES must have a hash entry.
-assert set(_WEIGHT_HASHES.keys()) == set(_WEIGHT_FILES), (  # noqa: S101
-    'WEIGHT_HASHES out of sync with _WEIGHT_FILES — one was added without the other'
-)
+# Sanity check: every file in _WEIGHT_FILES must have a hash entry. Raised rather
+# than asserted so that `python -O` cannot strip the check, and so the statement
+# survives black's preview formatting (which relocates a trailing `# noqa: S101`
+# onto the closing line, where ruff no longer applies it to the `assert`).
+if set(_WEIGHT_HASHES.keys()) != set(_WEIGHT_FILES):
+    raise AssertionError(
+        "_WEIGHT_HASHES out of sync with _WEIGHT_FILES — one was added without the other"
+    )
 
 
 def verify_sha256(path: str, expected: str) -> bool:
@@ -432,8 +451,9 @@ def _download_from_any_source(onnx_path: str, dest_model_path: str) -> None:
         try:
             if is_modelscope:
                 # ModelScope：直接下载 .onnx（按目录结构拼路径）
-                rel = os.path.relpath(dest_model_path,
-                                      os.path.dirname(os.path.dirname(dest_model_path)))
+                rel = os.path.relpath(
+                    dest_model_path, os.path.dirname(os.path.dirname(dest_model_path))
+                )
                 url = base_url + rel.replace("\\", "/")
                 download_utils.download_file(url, dest_model_path)
             else:
@@ -579,8 +599,7 @@ def main() -> None:
         auto_gpu and (cuda_available() or rocm_available() or dml_available())
     )
     segnet_use_gpu = force_gpu or (
-        auto_gpu
-        and (cuda_available() or rocm_available() or dml_available() or coreml_available())
+        auto_gpu and (cuda_available() or rocm_available() or dml_available() or coreml_available())
     )
     # The CoreML encoder is a separate opt-in and only applies when the
     # transformer isn't already on CUDA/ROCm.

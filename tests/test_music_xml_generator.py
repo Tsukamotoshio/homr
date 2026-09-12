@@ -65,12 +65,29 @@ def _first_measure(xml: ET.Element) -> ET.Element:
     return m
 
 
-
 # <note>'s child order is fixed by the MusicXML DTD; this is the subset homr emits.
 _NOTE_CHILD_ORDER = [
-    "grace", "chord", "pitch", "rest", "unpitched", "duration", "tie", "instrument",
-    "footnote", "level", "voice", "type", "dot", "accidental", "time-modification",
-    "stem", "notehead", "staff", "beam", "notations", "lyric",
+    "grace",
+    "chord",
+    "pitch",
+    "rest",
+    "unpitched",
+    "duration",
+    "tie",
+    "instrument",
+    "footnote",
+    "level",
+    "voice",
+    "type",
+    "dot",
+    "accidental",
+    "time-modification",
+    "stem",
+    "notehead",
+    "staff",
+    "beam",
+    "notations",
+    "lyric",
 ]
 
 

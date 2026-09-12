@@ -4,10 +4,6 @@ import os
 from pathlib import Path
 from time import perf_counter
 
-# 限制 onnxruntime CPU 推理线程数（使用不超过一半的逻辑核心），
-# 避免推理阶段占满所有 CPU 核心导致系统响应迟缓。
-_ORT_INTRA_THREADS = max(1, (os.cpu_count() or 4) - 2)
-
 import cv2
 import numpy as np
 import onnxruntime as ort
@@ -28,6 +24,10 @@ from homr.segmentation.config import (
 from homr.simple_logging import eprint
 from homr.type_definitions import NDArray
 
+# 限制 onnxruntime CPU 推理线程数（使用不超过一半的逻辑核心），
+# 避免推理阶段占满所有 CPU 核心导致系统响应迟缓。
+_ORT_INTRA_THREADS = max(1, (os.cpu_count() or 4) - 2)
+
 
 class Segnet:
     def __init__(self, use_gpu_inference: bool) -> None:
@@ -35,7 +35,7 @@ class Segnet:
         _sess_opts = ort.SessionOptions()
         _sess_opts.log_severity_level = 3  # 仅显示 ERROR，抑制 WARNING/INFO（含 Conv Fallback 等）
         _sess_opts.intra_op_num_threads = _ORT_INTRA_THREADS  # 限制单算子并行线程
-        _sess_opts.inter_op_num_threads = 1                   # 算子间串行执行
+        _sess_opts.inter_op_num_threads = 1  # 算子间串行执行
         if use_gpu_inference and (cuda_available() or rocm_available() or dml_available()):
             try:
                 # I had this issue: https://github.com/microsoft/onnxruntime/issues/21684
@@ -119,14 +119,14 @@ class Segnet:
         # 默认情况下 Python 按 __dict__ 插入顺序释放属性（model 先于 io_binding），
         # 此 __del__ 显式确保正确的释放顺序。
         try:
-            if hasattr(self, 'io_binding'):
+            if hasattr(self, "io_binding"):
                 del self.io_binding
-        except Exception:
+        except Exception:  # noqa: S110 — __del__ must not raise; there is nothing to recover
             pass
         try:
-            if hasattr(self, 'model'):
+            if hasattr(self, "model"):
                 del self.model
-        except Exception:
+        except Exception:  # noqa: S110 — __del__ must not raise; there is nothing to recover
             pass
 
     def run(self, input_data: NDArray) -> NDArray:
