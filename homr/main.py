@@ -394,17 +394,22 @@ _WEIGHT_BASE_URLS = [
 _WEIGHT_FILES = [
     "segnet_308-3296ccd40960f90ca6ab9c035cca945675d30a0f.onnx",
     "segnet_308-3296ccd40960f90ca6ab9c035cca945675d30a0f_fp16.onnx",
-    "encoder_pytorch_model_426-b6fd20809a8dcaf10dfd39a4ca4f64c6f056e644.onnx",
-    "encoder_pytorch_model_426-b6fd20809a8dcaf10dfd39a4ca4f64c6f056e644_fp16.onnx",
-    "decoder_pytorch_model_426-b6fd20809a8dcaf10dfd39a4ca4f64c6f056e644.onnx",
-    "decoder_pytorch_model_426-b6fd20809a8dcaf10dfd39a4ca4f64c6f056e644_fp16.onnx",
+    "encoder_pytorch_model_465-597144cab54c8f6d0f6c9619df5c5312694eadd6.onnx",
+    "encoder_pytorch_model_465-597144cab54c8f6d0f6c9619df5c5312694eadd6_fp16.onnx",
+    "decoder_pytorch_model_465-597144cab54c8f6d0f6c9619df5c5312694eadd6.onnx",
+    "decoder_pytorch_model_465-597144cab54c8f6d0f6c9619df5c5312694eadd6_fp16.onnx",
 ]
 
 # SHA256 hash of each weight file (lowercase hex, no prefix).
-# Computed from the canonical files served by ModelScope / GitHub releases.
 # Both mirrors must serve byte-identical files; if a future weight version is
 # uploaded with different bytes, regenerate these hashes from one mirror and
 # verify the other matches before shipping.
+#
+# Provenance: the segnet_308 hashes were verified against both mirrors. The
+# model-465 hashes (2026-09-29) come from the GitHub release only — they are the
+# zips' extracted .onnx — because the ModelScope mirror is this project's own and
+# does not carry 465 yet. Re-verify them against ModelScope once the four files
+# are uploaded there; until then mainland users fall through to GitHub.
 _WEIGHT_HASHES: dict[str, str] = {
     "segnet_308-3296ccd40960f90ca6ab9c035cca945675d30a0f.onnx": (
         "6ed36640db4ef5d223098b6d5efe4eda97c66b24a2c72faab8a018c749003a8d"
@@ -412,17 +417,17 @@ _WEIGHT_HASHES: dict[str, str] = {
     "segnet_308-3296ccd40960f90ca6ab9c035cca945675d30a0f_fp16.onnx": (
         "60f495496cb41473c0521d0811d8f44b9d5cff892d287974a8aebb3eaee2fa83"
     ),
-    "encoder_pytorch_model_426-b6fd20809a8dcaf10dfd39a4ca4f64c6f056e644.onnx": (
-        "1513e83ae281ef06cdb8f08451b59f06c56536f13bd3418b4fd13227543dc4ff"
+    "encoder_pytorch_model_465-597144cab54c8f6d0f6c9619df5c5312694eadd6.onnx": (
+        "92bd18338dc8da3c9b00185008ab14719ff9f912efe785ca42d7b623e06e0c6b"
     ),
-    "encoder_pytorch_model_426-b6fd20809a8dcaf10dfd39a4ca4f64c6f056e644_fp16.onnx": (
-        "cd2da3ddec91af046d274506947f01da079c4ec5908ba0dd4c0c5985f780c82a"
+    "encoder_pytorch_model_465-597144cab54c8f6d0f6c9619df5c5312694eadd6_fp16.onnx": (
+        "50823c061533328f5e64df016d3ed16eb9071a9f5c5ee8621646cf9ac9c8a992"
     ),
-    "decoder_pytorch_model_426-b6fd20809a8dcaf10dfd39a4ca4f64c6f056e644.onnx": (
-        "8652b5c2e3129775ca9109eb180c16c3615413ce38005adc8ce5966c3c76737c"
+    "decoder_pytorch_model_465-597144cab54c8f6d0f6c9619df5c5312694eadd6.onnx": (
+        "18801c1e3657bdea1b031db90b10d66e15accfc1d607780f09a9e059133e886a"
     ),
-    "decoder_pytorch_model_426-b6fd20809a8dcaf10dfd39a4ca4f64c6f056e644_fp16.onnx": (
-        "58d55eebe22788ce98f0fc7730480a79c9f56534db064e8d32b1d5fe2579904a"
+    "decoder_pytorch_model_465-597144cab54c8f6d0f6c9619df5c5312694eadd6_fp16.onnx": (
+        "aaac38c4f4be13ec587325486f29a60a919924f0eb82d35b52d4a2e7126dfbe0"
     ),
 }
 # Sanity check: every file in _WEIGHT_FILES must have a hash entry. Raised rather
