@@ -13,7 +13,7 @@ class FilePaths:
         # HOMR_MODELS_DIR (set by parent app) overrides module-relative paths.
         # `or workspace` ensures empty-string env values fall through to the default.
         models_dir = os.environ.get("HOMR_MODELS_DIR") or workspace
-        model_name = "pytorch_model_426-b6fd20809a8dcaf10dfd39a4ca4f64c6f056e644"
+        model_name = "pytorch_model_465-597144cab54c8f6d0f6c9619df5c5312694eadd6"
         self.encoder_path = os.path.join(
             models_dir,
             f"encoder_{model_name}.onnx",

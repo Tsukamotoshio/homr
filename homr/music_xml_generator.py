@@ -14,6 +14,7 @@ from homr.transformer.vocabulary import (
     EncodedSymbol,
     SymbolDuration,
     empty,
+    is_lower_position,
     nonote,
     sort_token_chords,
 )
@@ -73,22 +74,15 @@ class SymbolChord:
         return min(notes_rests)
 
     def into_positions(self) -> list["SymbolChord"]:
-        upper = []
-        lower = []
-        lower_is_only_rest = True
+        buckets: dict[str, list[EncodedSymbol]] = defaultdict(list)
         for symbol in self.symbols:
-            if symbol.position == "upper":
-                upper.append(symbol)
-            else:
-                lower.append(symbol)
-                lower_is_only_rest = lower_is_only_rest and symbol.rhythm.startswith("rest")
-        chords = (
-            SymbolChord(upper, self.tuplet_mark),
-            SymbolChord(lower, self.tuplet_mark),
+            buckets[symbol.position].append(symbol)
+        chords = [SymbolChord(symbols, self.tuplet_mark) for symbols in buckets.values()]
+        # Voices of only rests go first, the last chord is the one which advances time.
+        chords.sort(
+            key=lambda chord: all(s.rhythm.startswith("rest") for s in chord.symbols), reverse=True
         )
-        if lower_is_only_rest:
-            chords = (chords[1], chords[0])
-        return [chord for chord in chords if len(chord.symbols) > 0]
+        return chords
 
 
 class XmlGeneratorArguments:
@@ -127,7 +121,7 @@ def xml_to_string(element: ET.Element) -> str:
 
 def _voice_has_two_staves(voice: list[EncodedSymbol]) -> bool:
     """True if any symbol uses the lower staff (e.g. piano left hand / bass clef)."""
-    return any(s.position == "lower" for s in voice)
+    return any(is_lower_position(s.position) for s in voice)
 
 
 def build_part(
@@ -325,7 +319,7 @@ def build_key(model_key: EncodedSymbol, attributes: ET.Element) -> None:
 
 
 def get_staff(symbol: EncodedSymbol) -> int:
-    return 2 if symbol.position == "lower" else 1
+    return 2 if is_lower_position(symbol.position) else 1
 
 
 def get_xml_voice(staff_num: int, rhythmic_layer: int) -> int:
@@ -600,6 +594,8 @@ def build_articulations(
             ET.SubElement(notation, "arpeggiate")
         elif articulation == "accent":
             xml_articulations.append(ET.Element("accent"))
+        elif articulation == "mordent":
+            xml_articulations.append(ET.Element("mordent"))
         elif articulation == "staccato":
             xml_articulations.append(ET.Element("staccato"))
         elif articulation == "staccatissimo":
@@ -714,7 +710,9 @@ def build_note_or_rest(
         ET.SubElement(note, "type").text = DURATION_NAMES[base_duration]
     elif model_duration.fraction.numerator > 0:
         base_duration = 1 if model_duration.kern == 0 else model_duration.kern
-        ET.SubElement(note, "duration").text = str(int(model_duration.fraction * state.division))
+        ET.SubElement(note, "duration").text = str(
+            max(1, int(model_duration.fraction * state.division))
+        )
         ET.SubElement(note, "voice").text = str(get_xml_voice(staff_num, rhythmic_layer))
         ET.SubElement(note, "type").text = DURATION_NAMES[base_duration]
     else:
@@ -734,8 +732,20 @@ def build_note_or_rest(
 
     build_articulations(note, model_note.articulation, tuplet_mark, state)
     build_slurs(note, model_note.slur, slur_number)
+    build_image_position(note, model_note)
 
     return note
+
+
+def build_image_position(xml: ET.Element, symbol: EncodedSymbol) -> None:
+    """
+    Adds the position of the symbol on the input image as comment. The position is estimated
+    from the attention of the transformer, it points roughly at the symbol but isn't precise.
+    """
+    if symbol.image_coordinates is None:
+        return
+    x, y = symbol.image_coordinates
+    xml.append(ET.Comment(f" imgpos: {round(x)}, {round(y)} "))
 
 
 def build_multi_measure_rest(symbol: EncodedSymbol, attributes: ET.Element) -> None:
@@ -750,7 +760,7 @@ def build_multi_measure_rest(symbol: EncodedSymbol, attributes: ET.Element) -> N
 def build_backup(duration: Fraction, state: ConversionState) -> ET.Element:
     assert duration > Fraction(0), "Backup duration must be positive"
     backup = ET.Element("backup")
-    ET.SubElement(backup, "duration").text = str(int(duration * state.division))
+    ET.SubElement(backup, "duration").text = str(max(1, int(duration * state.division)))
     return backup
 
 
@@ -842,9 +852,13 @@ def find_division_and_time_signature_nominator(voice: list[SymbolChord]) -> tupl
             measure_duration.append(duration_in_measure)
             duration_in_measure = Fraction(0)
         else:
+            for symbol in chord.symbols:
+                if symbol.rhythm.startswith(("note", "rest")):
+                    frac = symbol.get_duration().fraction
+                    if frac > Fraction(0):
+                        durations.append(frac)
             duration = chord.get_duration()
             if duration > Fraction(0):
-                durations.append(duration)
                 duration_in_measure += duration
 
     if duration_in_measure > Fraction(0):
