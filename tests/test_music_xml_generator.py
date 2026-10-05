@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 from homr.music_xml_generator import (
     SymbolChord,
     XmlGeneratorArguments,
+    _split_mixed_chord,
     convert_ties,
     generate_xml,
     rebalance_measure_voices,
@@ -99,6 +100,28 @@ def _out_of_order_notes(xml: ET.Element) -> list[list[str]]:
         if ranks != sorted(ranks):
             bad.append(tags)
     return bad
+
+
+def _onsets(xml: ET.Element) -> list[tuple[str, str, float]]:
+    """(staff, pitch with octave, onset in quarter notes) for every note of the first measure."""
+    part = xml.find("part")
+    assert part is not None
+    divisions = int(part.findtext("measure/attributes/divisions", "1"))
+    time, onset, result = 0, 0, []
+    for element in _first_measure(xml):
+        if element.tag == "backup":
+            time -= int(element.findtext("duration", "0"))
+        elif element.tag == "forward":
+            time += int(element.findtext("duration", "0"))
+        elif element.tag == "note":
+            if element.find("chord") is None:
+                onset = time
+                time += _duration(element)
+            pitch = element.find("pitch")
+            if pitch is not None:
+                name = pitch.findtext("step", "") + pitch.findtext("octave", "")
+                result.append((_staff(element), name, onset / divisions))
+    return sorted(result)
 
 
 class TestMusicXmlGenerator(unittest.TestCase):
@@ -472,6 +495,86 @@ barline . . . . ."""
         xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
         self.assertEqual([], _out_of_order_notes(xml))
 
+    def test_next_group_starts_when_the_earliest_sounding_note_ends(self) -> None:
+        """
+        Tokens tell which notes start together, not when each group starts. Here the left
+        hand's quarter note E3 starts under the right hand's quarter note C5, so the right
+        hand's D5 starts when C5 ends (beat 1), while E3 is still sounding. Advancing by the
+        shortest note of the group just written would put D5 at beat 1.5 instead.
+        """
+        hands_moving_independently = """clef_G2 _ _ _ _ upper&clef_F4 _ _ _ _ lower
+keySignature_0 . . . . .
+timeSignature/4 . . . . .
+note_4 C5 _ _ _ upper&note_8 C3 _ _ _ lower
+note_4 E3 _ _ _ lower
+note_4 D5 _ _ _ upper
+note_8 G3 _ _ _ lower
+note_2 E5 _ _ _ upper&note_2 C3 _ _ _ lower
+barline . . . . ."""
+        tokens = read_token_lines(hands_moving_independently.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+        self.assertEqual(
+            _onsets(xml),
+            sorted(
+                [
+                    ("1", "C5", 0.0),
+                    ("1", "D5", 1.0),
+                    ("1", "E5", 2.0),
+                    ("2", "C3", 0.0),
+                    ("2", "E3", 0.5),
+                    ("2", "G3", 1.5),
+                    ("2", "C3", 2.0),
+                ]
+            ),
+        )
+
+    def test_independent_hands_in_elijah_measure(self) -> None:
+        """
+        Measure 6 of the Elijah page from issue #142, as the transformer reads it: the
+        right hand plays a quarter chord and dotted rhythms while the left hand holds A2
+        and moves in eighths and quarters. Every note must start on its beat, so that
+        no staff runs past the end of the 4/4 measure.
+        """
+        elijah_measure_6 = """clef_G2 _ _ _ _ upper&clef_F4 _ _ _ _ lower
+keySignature_-4 . . . . .
+timeSignature/4 . . . . .
+note_4 A4 b _ _ upper&note_4 E4 b _ _ upper&note_4 C4 _ _ _ upper&note_2 A2 b _ _ lower2&note_8 A2 b _ _ lower
+note_4 A3 b _ _ lower
+note_8. A4 b _ _ upper&note_8. E4 b _ _ upper&note_8. C4 _ _ _ upper
+note_8 A3 b _ _ lower
+note_16 C5 _ _ _ upper&note_16 A4 b _ _ upper&note_16 E4 b _ _ upper
+note_8. C5 _ _ _ upper&note_8. A4 b _ _ upper&note_8. G4 b _ _ upper&note_8. E4 b _ _ upper&note_8 A2 b _ _ lower
+note_4 C4 _ _ _ lower&note_4 A3 b _ _ lower
+note_16 E5 b _ _ upper&note_16 A4 b _ _ upper&note_16 G4 b _ _ upper
+note_8. E5 b _ _ upper&note_8. A4 b _ _ upper&note_8. G4 b _ _ upper
+note_8 E4 b _ _ lower&note_8 C4 _ _ _ lower&note_8 A3 b _ _ lower
+note_16 E5 b _ _ upper&note_16 A4 b _ _ upper&note_16 G4 b _ _ upper
+barline . . . . ."""
+        tokens = read_token_lines(elijah_measure_6.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+        onsets = _onsets(xml)
+        upper = sorted({onset for staff, _, onset in onsets if staff == "1"})
+        lower = sorted({onset for staff, _, onset in onsets if staff == "2"})
+        self.assertEqual(upper, [0.0, 1.0, 1.75, 2.0, 2.75, 3.0, 3.75])
+        self.assertEqual(lower, [0.0, 0.5, 1.5, 2.0, 2.5, 3.5])
+
+    def test_grace_notes_take_no_time(self) -> None:
+        """A group of only grace notes must not move later notes (the next note stays on beat 1)."""
+        with_grace_note = """clef_G2 _ _ _ _ upper&clef_F4 _ _ _ _ lower
+keySignature_0 . . . . .
+timeSignature/4 . . . . .
+note_4 C5 _ _ _ upper&note_2 C3 _ _ _ lower
+note_8G D5 _ _ _ upper
+note_4 E5 _ _ _ upper
+note_2 F5 _ _ _ upper&note_2 G2 _ _ _ lower
+barline . . . . ."""
+        tokens = read_token_lines(with_grace_note.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+        by_pitch = {name: onset for _, name, onset in _onsets(xml)}
+        self.assertEqual(by_pitch["E5"], 1.0)
+        self.assertEqual(by_pitch["F5"], 2.0)
+        self.assertEqual(by_pitch["G2"], 2.0)
+
     def test_image_position_is_written_as_comment(self) -> None:
         tokens = read_token_lines("""clef_G2 . . . . upper
 note_4 E4 _ _ _ upper
@@ -484,3 +587,308 @@ barline . . . . .""".splitlines())
         comments = [[c.text for c in n if c.tag is ET.Comment] for n in notes]  # type: ignore[comparison-overlap]
         self.assertEqual(comments, [[" imgpos: 45, 231 "], []])
         self.assertIn("<!-- imgpos: 45, 231 -->", ET.tostring(xml, encoding="unicode"))
+
+    def test_clef_change_joined_to_a_chord_of_notes(self) -> None:
+        """
+        The transformer sometimes joins a clef change in one staff to a chord of notes in the
+        other (a real clef change at that beat). The clef must be written, before the notes
+        that follow it, and must not be treated as a rest (that used to fail an assertion
+        and lose the whole page).
+        """
+        clef_in_chord = """clef_G2 _ _ _ _ upper&clef_F4 _ _ _ _ lower
+keySignature_0 . . . . .
+timeSignature/4 . . . . .
+note_4 C5 _ _ _ upper&note_4 C3 _ _ _ lower
+note_4 A4 _ _ _ upper&clef_G2 _ _ _ _ lower
+note_4 F4 _ _ _ lower
+note_2 G4 _ _ _ upper&note_2 E4 _ _ _ lower
+barline . . . . ."""
+        tokens = read_token_lines(clef_in_chord.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+        measure = _first_measure(xml)
+        pitches = [name for _, name, _ in _onsets(xml)]
+        self.assertEqual(sorted(pitches), ["A4", "C3", "C5", "E4", "F4", "G4"])
+        order = [
+            ("clef", c.get("number"), c.findtext("sign"))
+            for element in measure
+            for c in ([element] if element.tag == "note" else element.iter("clef"))
+        ]
+        lower_clefs = [entry for entry in order if entry[0] == "clef" and entry[1] == "2"]
+        self.assertEqual([sign for _, _, sign in lower_clefs], ["F", "G"])
+        notes_and_clefs = [
+            "clef" if element.tag != "note" else _pitch(element) + _staff(element)
+            for element in measure
+            if element.tag == "note" or element.find("clef") is not None
+        ]
+        self.assertLess(notes_and_clefs.index("clef", 1), notes_and_clefs.index("F2"))
+
+    def test_barline_joined_to_a_chord_of_notes(self) -> None:
+        """A barline the transformer joined to the last chord of a measure still ends the measure."""
+        barline_in_chord = """clef_G2 _ _ _ _ upper&clef_F4 _ _ _ _ lower
+keySignature_0 . . . . .
+timeSignature/4 . . . . .
+note_4 C5 _ _ _ upper&note_4 C3 _ _ _ lower
+note_4 D5 _ _ _ upper&note_4 D3 _ _ _ lower&barline _ _ _ _ .
+note_2 E5 _ _ _ upper&note_2 E3 _ _ _ lower
+barline . . . . ."""
+        tokens = read_token_lines(barline_in_chord.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+        measures = xml.findall("part/measure")
+        self.assertEqual(len(measures), 2)
+        self.assertEqual(sorted(_pitch(n) for n in _notes(measures[0])), ["C", "C", "D", "D"])
+        self.assertEqual(sorted(_pitch(n) for n in _notes(measures[1])), ["E", "E"])
+
+    def test_clef_with_a_pitch_is_not_written_as_a_note(self) -> None:
+        """A clef token that came with a pitch, joined to a note, must not become an extra note."""
+        clef_with_pitch = """clef_G2 _ _ _ _ upper&clef_G2 _ _ _ _ lower
+keySignature_0 . . . . .
+timeSignature/4 . . . . .
+note_2 F4 _ _ _ upper&clef_F4 F5 _ _ _ lower
+note_2 G4 _ _ _ upper&note_2 C3 _ _ _ lower
+barline . . . . ."""
+        tokens = read_token_lines(clef_with_pitch.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+        pitches = sorted(name for _, name, _ in _onsets(xml))
+        self.assertEqual(pitches, ["C3", "F4", "G4"])
+
+    def test_barline_joined_to_a_chord_and_repeated_after_it_counts_once(self) -> None:
+        """A barline joined to a chord and then written again on its own ends only one measure."""
+        barline_twice = """clef_G2 _ _ _ _ upper&clef_F4 _ _ _ _ lower
+keySignature_0 . . . . .
+timeSignature/4 . . . . .
+note_4 C5 _ _ _ upper&note_4 C3 _ _ _ lower
+note_4 D5 _ _ _ upper&note_4 D3 _ _ _ lower&barline F5 _ _ _ upper
+barline . . . . .
+note_2 E5 _ _ _ upper&note_2 E3 _ _ _ lower
+barline . . . . ."""
+        tokens = read_token_lines(barline_twice.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+        measures = xml.findall("part/measure")
+        self.assertEqual(len(measures), 2)
+        self.assertEqual(sorted(_pitch(n) for n in _notes(measures[0])), ["C", "C", "D", "D"])
+
+    def test_mixed_chord_is_split_into_before_notes_after(self) -> None:
+        """
+        Clefs, keys and time signatures go before the notes of the chord, in the order
+        they have at the start of a line, barlines after.
+        """
+        chord = [
+            EncodedSymbol("barline"),
+            EncodedSymbol("timeSignature/4"),
+            EncodedSymbol("note_4", "C4", position="upper"),
+            EncodedSymbol("keySignature_1"),
+            EncodedSymbol("clef_G2", position="lower"),
+            EncodedSymbol("rest_4", position="lower"),
+        ]
+        parts = _split_mixed_chord(chord)
+        rhythms = [[s.rhythm for s in part] for part in parts]
+        self.assertEqual(
+            rhythms,
+            [
+                ["clef_G2"],
+                ["keySignature_1"],
+                ["timeSignature/4"],
+                ["note_4", "rest_4"],
+                ["barline"],
+            ],
+        )
+
+    def test_chords_without_notes_or_only_notes_are_not_split(self) -> None:
+        clefs = [
+            EncodedSymbol("clef_G2", position="upper"),
+            EncodedSymbol("clef_F4", position="lower"),
+        ]
+        notes = [
+            EncodedSymbol("note_4", "C4", position="upper"),
+            EncodedSymbol("rest_4", position="lower"),
+        ]
+        self.assertEqual(_split_mixed_chord(clefs), [clefs])
+        self.assertEqual(_split_mixed_chord(notes), [notes])
+
+    def test_key_signature_joined_to_a_chord_of_notes(self) -> None:
+        key_in_chord = """clef_G2 _ _ _ _ upper&clef_F4 _ _ _ _ lower
+keySignature_0 . . . . .
+timeSignature/4 . . . . .
+note_2 C5 _ _ _ upper&note_2 C3 _ _ _ lower
+barline . . . . .
+note_2 D5 _ _ _ upper&note_2 D3 _ _ _ lower&keySignature_2 . . . . .
+barline . . . . ."""
+        tokens = read_token_lines(key_in_chord.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+        measures = xml.findall("part/measure")
+        self.assertEqual(len(measures), 2)
+        self.assertEqual(measures[1].findtext("attributes/key/fifths"), "2")
+        self.assertEqual(sorted(_pitch(n) for n in _notes(measures[1])), ["D", "D"])
+
+    def test_time_signature_joined_to_a_chord_of_notes(self) -> None:
+        time_in_chord = """clef_G2 _ _ _ _ upper&clef_F4 _ _ _ _ lower
+keySignature_0 . . . . .
+note_4 C5 _ _ _ upper&note_4 C3 _ _ _ lower&timeSignature/4 . . . . .
+note_4 D5 _ _ _ upper&note_4 D3 _ _ _ lower
+barline . . . . ."""
+        tokens = read_token_lines(time_in_chord.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+        self.assertIsNotNone(_first_measure(xml).find("attributes/time"))
+        self.assertEqual(sorted(name for _, name, _ in _onsets(xml)), ["C3", "C5", "D3", "D5"])
+
+    def test_clef_joined_to_a_chord_of_rests(self) -> None:
+        clef_with_rests = """clef_G2 _ _ _ _ upper&clef_F4 _ _ _ _ lower
+keySignature_0 . . . . .
+timeSignature/4 . . . . .
+rest_4 _ _ _ _ upper&rest_4 _ _ _ _ lower&clef_G2 _ _ _ _ lower
+note_4 C5 _ _ _ upper&note_4 E4 _ _ _ lower
+barline . . . . ."""
+        tokens = read_token_lines(clef_with_rests.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+        lower_clefs = [
+            c.findtext("sign") for c in _first_measure(xml).iter("clef") if c.get("number") == "2"
+        ]
+        self.assertEqual(lower_clefs, ["F", "G"])
+        self.assertEqual(sorted(name for _, name, _ in _onsets(xml)), ["C5", "E4"])
+
+    def test_repeat_joined_to_a_chord_of_notes_is_kept(self) -> None:
+        """
+        A repeat sorts before the notes of its chord, so the chord used to be written as a
+        repeat only and its notes were dropped without an error.
+        """
+        repeat_in_chord = """clef_G2 _ _ _ _ upper&clef_F4 _ _ _ _ lower
+keySignature_0 . . . . .
+timeSignature/4 . . . . .
+note_2 C5 _ _ _ upper&note_2 C3 _ _ _ lower&repeatEnd . . . . .
+note_2 D5 _ _ _ upper&note_2 D3 _ _ _ lower
+barline . . . . ."""
+        tokens = read_token_lines(repeat_in_chord.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+        measures = xml.findall("part/measure")
+        self.assertEqual(len(measures), 2)
+        self.assertEqual(sorted(_pitch(n) for n in _notes(measures[0])), ["C", "C"])
+        repeat = measures[0].find("barline/repeat")
+        self.assertIsNotNone(repeat)
+        self.assertEqual(repeat.get("direction"), "backward")  # type: ignore[union-attr]
+
+    def test_repeat_split_off_a_chord_wins_over_a_following_plain_barline(self) -> None:
+        repeat_then_barline = """clef_G2 _ _ _ _ upper&clef_F4 _ _ _ _ lower
+keySignature_0 . . . . .
+timeSignature/4 . . . . .
+note_2 C5 _ _ _ upper&note_2 C3 _ _ _ lower&repeatEnd . . . . .
+barline . . . . .
+note_2 D5 _ _ _ upper&note_2 D3 _ _ _ lower
+barline . . . . ."""
+        tokens = read_token_lines(repeat_then_barline.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+        measures = xml.findall("part/measure")
+        self.assertEqual(len(measures), 2)
+        repeat = measures[0].find("barline/repeat")
+        self.assertIsNotNone(repeat)
+        self.assertEqual(repeat.get("direction"), "backward")  # type: ignore[union-attr]
+
+    def test_clef_joined_to_the_middle_of_a_triplet(self) -> None:
+        """Splitting the chord must not break the triplet around it."""
+        clef_in_triplet = """clef_G2 _ _ _ _ upper&clef_F4 _ _ _ _ lower
+keySignature_0 . . . . .
+timeSignature/4 . . . . .
+note_12 C5 _ _ _ upper&note_4 C3 _ _ _ lower
+note_12 D5 _ _ _ upper&clef_G2 _ _ _ _ lower
+note_12 E5 _ _ _ upper
+note_4 F5 _ _ _ upper&note_4 F4 _ _ _ lower
+barline . . . . ."""
+        tokens = read_token_lines(clef_in_triplet.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+        triplet = [
+            n for n in _notes(_first_measure(xml)) if n.find("time-modification") is not None
+        ]
+        self.assertEqual([_pitch(n) for n in triplet], ["C", "D", "E"])
+        marks = [[t.get("type") for t in n.iter("tuplet")] for n in triplet]
+        self.assertEqual(marks, [["start"], [], ["stop"]])
+        by_pitch = {name: onset for _, name, onset in _onsets(xml)}
+        self.assertEqual(by_pitch["F5"], 1.0)
+
+    def test_real_page_clef_change_in_a_chord(self) -> None:
+        """First measure of a system of Clair de lune (Mutopia edition, page 4) as read by the transformer."""
+        clair_de_lune = """clef_G2 _ _ _ _ upper&clef_F4 _ _ _ _ lower
+keySignature_-5 . . . . .
+rest_8 _ _ _ _ upper&note_8 D2 b _ _ lower&note_8 A2 b _ _ lower
+note_4 F3 _ _ _ upper2&note_4 A3 b _ _ upper&clef_G2 _ _ _ _ lower
+note_8 F4 _ _ _ lower&note_8 A4 b _ slurStart lower
+note_4. F5 _ _ _ upper&note_4. A5 b _ _ upper&note_2. F4 _ _ _ lower&note_2. C4 b _ _ lower2&note_2. A4 b _ slurStop lower
+note_4. F5 _ _ slurStart_slurStop upper&note_4. D5 b _ _ upper
+barline . . . . ."""
+        tokens = read_token_lines(clair_de_lune.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+        lower_clefs = [
+            c.findtext("sign") for c in _first_measure(xml).iter("clef") if c.get("number") == "2"
+        ]
+        self.assertEqual(lower_clefs, ["F", "G"])
+        pitches = [_pitch(n) + n.findtext("pitch/octave", "") for n in _notes(_first_measure(xml))]
+        self.assertEqual(
+            pitches,
+            ["rest", "D2", "A2", "F3", "A3", "F4", "A4", "F5", "A5", "F4", "A4", "C4", "F5", "D5"],
+        )
+
+    def test_real_page_barline_in_a_chord(self) -> None:
+        """First two measures of polish-scores train_050 as read by the transformer."""
+        train_050 = """clef_G2 _ _ _ _ upper&clef_F4 _ _ _ _ lower
+keySignature_-2 . . . . .
+note_8 F5 _ _ _ upper&note_8 F4 _ _ _ upper&note_8 F2 _ _ _ lower&note_8 D5 _ _ _ upper&note_8 B4 b _ _ upper
+rest_8 _ _ _ _ upper&rest_8 _ _ _ _ lower
+clef_G2 _ _ _ _ lower&clef_F4 _ _ _ _ upper
+rest_8 _ _ _ _ upper&note_2 F4 _ _ _ lower&note_2 D4 _ _ _ lower&note_2 B4 b accent _ lower
+note_12 C3 # _ slurStart upper
+note_12 E3 b _ _ upper
+note_12 D3 _ _ _ upper
+note_12 F3 _ _ _ upper
+note_12 B3 b _ _ upper
+note_8 F2 _ _ _ lower&barline _ _ _ _ .
+rest_8 _ _ _ _ upper&rest_8 _ _ _ _ lower
+rest_8 _ _ _ _ upper&note_2 E4 _ _ _ lower&note_2 C4 # _ _ lower&note_2 A4 _ _ _ lower
+note_8 G3 # _ slurStart upper
+note_8 B3 b _ _ upper
+note_8 A3 _ _ _ upper
+note_8 E4 _ _ _ upper
+note_8 G4 _ _ _ upper
+barline . . . . ."""
+        tokens = read_token_lines(train_050.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+        measures = xml.findall("part/measure")
+        self.assertEqual(len(measures), 2)
+        self.assertEqual([_pitch(n) for n in _notes(measures[0])][-1], "F")
+        self.assertIn("G", [_pitch(n) for n in _notes(measures[1])])
+
+    def test_barline_split_off_a_chord_and_a_repeat_joined_to_the_next_chord(self) -> None:
+        """Only a plain barline after a split-off barline is a duplicate, not a chord with a repeat."""
+        both = """clef_G2 _ _ _ _ upper&clef_F4 _ _ _ _ lower
+keySignature_0 . . . . .
+timeSignature/4 . . . . .
+note_2 C5 _ _ _ upper&note_2 C3 _ _ _ lower&barline _ _ _ _ .
+note_2 D5 _ _ _ upper&note_2 D3 _ _ _ lower&repeatEnd . . . . .
+note_2 E5 _ _ _ upper&note_2 E3 _ _ _ lower
+barline . . . . ."""
+        tokens = read_token_lines(both.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+        measures = xml.findall("part/measure")
+        self.assertEqual(len(measures), 3)
+        self.assertEqual(
+            [sorted(_pitch(n) for n in _notes(m)) for m in measures],
+            [["C", "C"], ["D", "D"], ["E", "E"]],
+        )
+
+    def test_symbols_split_off_a_chord_are_written_as_if_they_came_separately(self) -> None:
+        """A key and time signature joined to a chord give the same MusicXML as on their own lines."""
+        joined = """clef_G2 _ _ _ _ upper&clef_F4 _ _ _ _ lower
+note_4 C5 _ _ _ upper&note_4 C3 _ _ _ lower&keySignature_2 . . . . .&timeSignature/4 . . . . .
+note_4 D5 _ _ _ upper&note_4 D3 _ _ _ lower
+barline . . . . ."""
+        separate = """clef_G2 _ _ _ _ upper&clef_F4 _ _ _ _ lower
+keySignature_2 . . . . .
+timeSignature/4 . . . . .
+note_4 C5 _ _ _ upper&note_4 C3 _ _ _ lower
+note_4 D5 _ _ _ upper&note_4 D3 _ _ _ lower
+barline . . . . ."""
+        written = [
+            ET.tostring(
+                generate_xml(XmlGeneratorArguments(), [read_token_lines(t.splitlines())], ""),
+                encoding="unicode",
+            )
+            for t in (joined, separate)
+        ]
+        self.assertEqual(written[0], written[1])
